@@ -1553,3 +1553,4 @@ pnpm typecheck && pnpm lint && pnpm build
 - The log is capped at **10 failed-row lines per batch**, with a line saying how
   many were omitted. Every failure is still in the results table; only the repetition
   is trimmed.
+# GOP-IMPORT

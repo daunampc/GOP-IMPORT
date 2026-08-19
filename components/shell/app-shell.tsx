@@ -63,7 +63,7 @@ export function AppShell({
           {/* One column: the acting-as bar, then the ordinary shell beneath it.
               The bar is part of the LAYOUT rather than an overlay, so it pushes
               everything down and cannot be scrolled away from or covered. */}
-          <div className="flex h-dvh flex-col overflow-hidden bg-canvas">
+          <div className="flex h-screen flex-col overflow-hidden bg-canvas">
             {actingAs ? <ActingAsBar account={actingAs} adminEmail={user.email} /> : null}
 
             <div className="flex min-h-0 flex-1 overflow-hidden">
