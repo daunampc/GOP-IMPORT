@@ -40,7 +40,13 @@ export function isOutdated(installed: string | null, expected: string | null): b
 }
 
 /**
- * The build that moved image downloading OFF the site — `POST /images/upload`.
+ * The build the "copy into the site's media library" mode needs.
+ *
+ * 3.9.0 moved image downloading off the site; 3.10.0 changed the wire to raw bytes
+ * and added `POST /images/present`, and the app now depends on both. Raised rather
+ * than kept at 3.9.0 because the format is not negotiated: a 3.9.0 site would read a
+ * framed body as base64 JSON and refuse every entry, which is a worse failure than
+ * being told to update.
  *
  * It lives HERE rather than beside the other gates in `lib/plugin-support.ts`
  * because the import wizard has to grey the option out before a run is started, and
@@ -49,7 +55,7 @@ export function isOutdated(installed: string | null, expected: string | null): b
  * an operator reads; the bare fact of which version is needed belongs where both
  * sides can see it, rather than being written as "3.9.0" in two places.
  */
-export const IMAGE_UPLOAD_VERSION = "3.9.0";
+export const IMAGE_UPLOAD_VERSION = "3.10.0";
 
 /** True when this site can be sent image bytes to write. Null means "unknown". */
 export function supportsImageUpload(pluginVersion: string | null | undefined): boolean {
@@ -106,9 +112,10 @@ export function imageUploadSupport(pluginVersion: string | null): PluginSupport 
       required: IMAGE_UPLOAD_VERSION,
       message:
         `This site runs plugin ${pluginVersion}, and copying images into its media library needs ` +
-        `${IMAGE_UPLOAD_VERSION}. From that build the app downloads each image and sends the bytes ` +
-        `to the site, instead of asking the site's PHP to fetch them — which is what used to hold ` +
-        `PHP processes open long enough to take a shop offline mid-import. Update the plugin on ` +
+        `${IMAGE_UPLOAD_VERSION}. From that build the app downloads each image and sends the raw ` +
+        `bytes to the site — instead of asking the site's PHP to fetch them, which is what used to ` +
+        `hold PHP processes open long enough to take a shop offline mid-import — and it can ask the ` +
+        `site which images it already has, so a re-run sends almost nothing. Update the plugin on ` +
         `that site, or start this run with a different image mode.`,
     };
   }

@@ -214,7 +214,8 @@ Without the worker, jobs sit in the queue for ever — the interface will show
 | `GOP_RETRY_BACKOFF_MS` | no | Wait after a batch's first failed attempt (default 2000). Doubles each time, so the default is 2s then 4s |
 | `TELEGRAM_API_BASE` | no | Where Telegram's API lives (default `https://api.telegram.org`). A seam for the test suite, which cannot call the real API; unset in production |
 | `GOP_SLOW_BATCH_MS` | no | How slow one batch may be before the run keeps one fewer lane flying (default 60000, half the default deadline). Never goes below one lane, and never above the lane count the operator chose |
-| `GOP_IMAGE_UPLOAD_BYTES` | no | Raw image bytes packed into one `/images/upload` request (default 16 MB, never above the plugin's 22 MB ceiling). Lower it for a site with a small PHP `memory_limit` — `GET /health` reports that limit on the Sites screen |
+| `GOP_IMAGE_UPLOAD_BYTES` | no | Raw image bytes packed into one `/images/upload` request (default **24 MB**, never above the plugin's 31 MB ceiling). Lower it for a site with a small PHP `memory_limit` — `GET /health` reports that limit on the Sites screen |
+| `GOP_IMAGE_DOWNLOAD_LANES` | no | Image downloads in flight **for the whole process**, across every run (default 16, capped at 64). This used to be eight *per batch*, which `threads` silently multiplied — 32 lanes meant 256 concurrent downloads, chosen by nobody. Past a saturated link every extra download slows the others and pushes some over the 30s deadline, where they fail rather than merely arrive late. Each run logs whether the ceiling was ever reached, so raising it is a decision with evidence |
 | `GOP_IMAGE_HOST_ALLOWLIST` | no | Comma-separated hostnames whose **private** address is tolerated, for a customer whose images genuinely sit inside their own network. Matched exactly, never as a suffix. Everything else private stays refused |
 | `GOP_ALLOW_PRIVATE_IMAGE_HOSTS` | no | `1` turns the address check off **entirely**. Local development only — prefer the allowlist above, which is one host rather than all of them |
 | `REDIS_URL` | yes | The queue, the Stop broadcast and the log broadcast. Losing it costs responsiveness, never data — every durable fact is in Postgres |
@@ -251,7 +252,7 @@ that site's database.
 | Generate a SKU when the row has none | Pattern accepts `{seq}`, `{hash}`, `{slug}`, `{name}`. Nothing comes from the clock or a random number, so re-running a file produces the same SKUs and not a second set of products. Generated SKUs are marked in the preview |
 | Stop if the CSV has errors | Fails at the read step instead of publishing half a file and discovering the problem afterwards |
 | Force category / tag | Replaces whatever the file said. Chosen from the categories that **actually exist on the site** via `GET /terms`, or typed as new ones |
-| Image handling | Keep the original links (FIFU), copy into the site's media library, or **upload to Amazon S3** and publish the bucket's URLs. In both copying modes **this app downloads the images**, never the shop's own PHP — see below. One image used by many products is downloaded once per run and stored once |
+| Image handling | Keep the original links (FIFU), copy into the site's media library, or **upload to Amazon S3** and publish the bucket's URLs. In both copying modes **this app downloads the images**, never the shop's own PHP — see below. One image used by many products is downloaded once per run and stored once, and one the site already holds is not downloaded at all |
 | Parallel batches | How many batches fly at once |
 | Products per batch | 1–50. The plugin rejects anything larger — a hard ceiling, not a suggestion |
 
@@ -661,6 +662,55 @@ carries on with fewer.
   what it is being given. A batch that hits its deadline is over the threshold by
   definition, so the timeout case needs no rule of its own.
 
+### Copying images into a site: what makes it fast
+
+Three things, in the order they save the most. All of them need plugin **3.10.0**, and
+a run in this mode is refused against anything older rather than degrading.
+
+**1. Ask the site first.** `POST /images/present` names the images the site already
+holds, and each of those is then neither downloaded from its source nor sent. On a
+catalogue being re-synced this is most of the traffic of a run — often all of it. It
+works because the path an image lands at is a pure function of its source URL
+(`gop-import/<2 hex>/<slug>-<hash8>.<ext>`); under the dated `YYYY/MM` layout the same
+image re-imported the following month landed somewhere else, so there was nothing to
+look up. A failure to ask is not a failure of the run: the answer becomes "we do not
+know", everything is sent as before, and the operator is told nothing, because the
+route exists to remove work and losing it costs only time.
+
+**2. Download and upload at the same time.** These used to be two phases per batch:
+every image fetched before the first byte went to the site. With heavy images both are
+slow and neither overlapped the other — the link to the source and the link to the
+shop took turns being idle. Downloads now feed a request that is handed off as soon as
+it is full, while the lanes go straight back to fetching.
+
+Uploads stay **serial** within a lane on purpose. Each import lane stages separately,
+so requests in flight against the site already equal the run's `threads`;
+parallelising per lane would multiply the two and put back the PHP pressure that 3.9.0
+removed.
+
+**3. Raw bytes, not base64.** The upload body is a JSON manifest, a newline, then the
+images end to end. Base64 cost a third of the wire — 2.00 MB of JPEG becomes 2.67 MB,
+measured — plus an encode here and a decode there. Gzip is not an alternative: a JPEG
+is already compressed, so gzipping its base64 only removes the padding base64 just
+added, at ~92ms of CPU per 2 MB on each side. Raw bytes need no new signing scheme,
+which is the point — the HMAC covers the whole body either way, and
+multipart/form-data is the option that *cannot* work, because PHP leaves
+`php://input` empty for it and the signature would fail on every request.
+
+**What each batch cost is logged**, per batch: how many images were already on the
+site, how many were downloaded and how many megabytes that was, how many requests
+carried them, and the time in each phase. "The run is slow" has at least four
+different answers here — a slow source, a slow shop uplink, enormous images, or
+re-sending what the site already has — and they need opposite responses. Each run also
+closes by saying whether the download ceiling was ever reached, so `GOP_IMAGE_DOWNLOAD_LANES`
+can be tuned against evidence rather than guessed at.
+
+**Two knobs that behave the opposite way to intuition.** With heavy images a *smaller*
+`batchSize` is often faster, because staging is per batch and a smaller one starts
+uploading sooner and holds less in memory. And raising `threads` past the point where
+the link is saturated makes image staging slower, not faster — which is what the
+process-wide download ceiling now protects against.
+
 ### Do the image links work? — asked before the run, not during it
 
 A dead image URL used to surface halfway through an import: the products were
@@ -1043,33 +1093,38 @@ pnpm typecheck && pnpm lint && pnpm build
   matters here beyond the typecheck, because this change moved a version gate ACROSS the
   `server-only` boundary so the import wizard could reach it, and only the build proves a
   Client Component is not pulling in server code.
-- `./tests/images-staging.sh` green: **41/41** — the internal-address guard across
+- `./tests/images-staging.sh` green: **52/52** — the internal-address guard across
   IPv4, IPv6, IPv4-mapped IPv6 and per-redirect-hop; an ordinary redirect still
   followed; 200-with-a-page refused; an oversized `Content-Length` refused on the
   header; the packing arithmetic; a shared image downloaded **once per run** (counted
   at the fake host, not in the app); a failed image **not** cached so a later batch
   retries; and each failure attributed to the download or to the site.
-- `GPM_toshstack/tests/integration.php` green: **95/95** (86 before this change) — the
-  nine new ones cover `ImageWriter`: the file lands under `uploads/YYYY/MM` with a
-  slug and a hash, a second write of the same source URL is **skipped and leaves no
-  `-1` duplicate**, a truncated file from an earlier crash is overwritten, the magic
-  bytes beat the declared content type, one bad entry does not take the request down,
-  `id_multisite` cannot inject a path, the client cannot choose the filename, and a
-  written image gets **real** `_wp_attachment_metadata` with dimensions.
+- `GPM_toshstack/tests/integration.php` green: **99/99** — the
+  `ImageWriter` tests cover the framed body — three images in one body each written
+  from their own offset, and an entry the body is too short for failing without
+  touching the ones before it — the content-addressed path with **no `YYYY/MM`**, a
+  second write of the same source URL **skipped with no `-1` duplicate**, a truncated
+  file from an earlier crash overwritten, the magic bytes beating the declared content
+  type, `id_multisite` unable to inject a path, no way for a client to choose a
+  filename, **real** `_wp_attachment_metadata` with dimensions, and `present()`
+  answering for what was written, for another site's file, and for junk.
 - 45 plugin PHP files lint clean under PHP 8.1.
-- `./tests/e2e.sh` green: **95/95** end-to-end — the TypeScript client's HMAC
+- `./tests/e2e.sh` green: **100/100** end-to-end — the TypeScript client's HMAC
   signature is accepted by the PHP plugin, a run survives a process boundary, a
   variable product creates all its variations, a failed row is reported alone
   without taking the batch down, row indexes keep the original order, a removal
   run takes the products back off the site, **620 seeded products are removed by
   a single run leaving the site empty**, and a run whose owner has no S3 fails
   rather than borrowing another account's bucket. **A 1 MB image survives base64 and
-  the HMAC over the whole body** — the wire neither of the two image suites can reach,
-  since one stubs the plugin and the other calls `ImageWriter` directly — sending it
-  again reports `skipped` with the same URL and no `-1` duplicate, an HTML page
-  labelled `image/jpeg` is refused **by the site**, `/images/fetch` answers 404
-  `unknown_route`, and a whole `upload_site` run publishes both products with the dead
-  link keeping its original URL. No secret appears in the
+  the HMAC over every byte of it** — the wire neither of the two image suites can
+  reach, since one stubs the plugin and the other calls `ImageWriter` directly. The
+  probe says **no** before the image is sent and **yes** afterwards, at exactly the URL
+  the upload returned, which is the assertion the whole optimisation rests on; three
+  images of different types in one framed body each keep the extension their own bytes
+  imply, so no offset drifted; sending one again reports `skipped` with the same URL and
+  no `-1` duplicate; an HTML page labelled `image/jpeg` is refused **by the site**;
+  `/images/fetch` answers 404 `unknown_route`; and a whole `upload_site` run publishes
+  both products with the dead link keeping its original URL. No secret appears in the
   worker's captured output. A failed row's message reaches the results table
   **whole** — asserted for absence of truncation, not merely for presence — and each
   failure maps back to its staged product by original row index, which is what makes
@@ -1341,13 +1396,16 @@ pnpm typecheck && pnpm lint && pnpm build
 
 **Needs one action from you:**
 
-- **Each site's plugin must be updated to 3.9.0** before the "copy into the site's
-  media library" image mode will work on it again. 3.9.0 is the build that took image
-  downloading off the shop's own server — the app now downloads each image and sends
-  the bytes — and it **removed** the old `/images/fetch` route outright. The wizard
-  greys the mode out, the route answers 409 and the worker refuses the run, each
-  naming the site and its version, rather than publishing every product with its
-  supplier's links and reporting success.
+- **Each site's plugin must be updated to 3.10.0** before the "copy into the site's
+  media library" image mode will work on it again. 3.9.0 took image downloading off
+  the shop's own server; 3.10.0 changed the wire to raw bytes and added the "do you
+  already have this image" lookup, and the app depends on both. The wizard greys the
+  mode out, the route answers 409 and the worker refuses the run, each naming the site
+  and its version, rather than publishing every product with its supplier's links and
+  reporting success.
+
+  Images copied by 3.8.0 or earlier sit under `YYYY/MM` and are not found by the new
+  lookup, so the first run after upgrading re-sends them once.
 
   **Deploy this app first, then update the sites.** In that order nothing breaks
   silently: runs in that one mode are refused with a sentence saying why until each
@@ -1370,9 +1428,16 @@ pnpm typecheck && pnpm lint && pnpm build
   and closing that needs the connection pinned to the address that was checked, which
   Node's `fetch` does not expose. The plugin's `ImageFetcher::reject()` had the same
   hole, so nothing regressed; it is simply not fixed.
-- **The 22 MB per-image ceiling in `upload_site` is a reduction from 32 MB**, and has
-  not been observed to matter. Base64 in a 32 MB body cannot carry more, and raising
-  `MAX_BODY_BYTES` would move the memory ceiling of every route rather than this one.
+- **The speed work has not been measured against a real shop.** Every claim about it
+  here is either a byte count (base64's 33%, measured locally) or a structural fact
+  (the barrier is gone; an image the site holds is not fetched). What none of it is, is
+  a before-and-after wall-clock number from a live catalogue over a real uplink. The
+  per-batch cost log exists so that number can be read off the next real run rather
+  than estimated here.
+- **The content-addressed path is a departure from WordPress's dated layout**, and
+  nothing has been checked beyond this plugin's own reading of it: `AttachmentMeta`
+  produces correct dimensions and the media library displays the file, but a third-party
+  plugin that assumes `YYYY/MM` has not been looked for.
 - **The `s3` mode's behaviour changed and no test covers the change.** It now shares
   the downloader, so it refuses an internal address and refuses a source answering 200
   with an HTML page — the latter previously went into the bucket and was published as

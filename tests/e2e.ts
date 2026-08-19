@@ -14,6 +14,7 @@
  * Run through tests/e2e.sh, never directly.
  */
 
+import { randomBytes } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 
 import { closeDatabase } from "../db";
@@ -1314,46 +1315,86 @@ async function verifyImageUpload(store: Store, alice: TestAccount): Promise<void
   );
 
   /*
-   * A megabyte, not a thumbnail. The point is a body large enough that base64
-   * inflation and the HMAC over it are exercised for real — a 20-byte fixture would
-   * pass whether or not the signing covers the bytes.
+   * A megabyte, not a thumbnail. The point is a body large enough that the HMAC over
+   * it is exercised for real — a 20-byte fixture would pass whether or not the signing
+   * covers the bytes.
+   *
+   * The bytes are deliberately NOT uniform: `randomBytes` cannot be mistaken for
+   * padding, so a truncated or re-encoded body shows up as a size or a hash mismatch
+   * rather than as a file that happens to look right.
    */
-  const bytes = Buffer.alloc(1024 * 1024);
-  bytes.write("\xFF\xD8\xFF\xE0", 0, "binary");
+  const bytes = Buffer.concat([
+    Buffer.from("\xFF\xD8\xFF\xE0", "binary"),
+    randomBytes(1024 * 1024),
+  ]);
 
   const sourceUrl = `${imageHost}/e2e-wire-probe.jpg`;
 
+  /*
+   * BEFORE anything is sent, the site must say it does not have this image.
+   *
+   * Asserted first because the value of `/images/present` is entirely in its answers
+   * being right: a false "yes" would publish a URL serving nothing, and a false "no"
+   * only costs bandwidth. Getting the "no" here and the "yes" further down proves both
+   * directions against the real plugin.
+   */
+  const before = await client.imagesPresent([sourceUrl]);
+
+  check(
+    "the site says it does NOT hold an image it has never been sent",
+    before.length === 1 && before[0].source_url === sourceUrl && before[0].url === null,
+    JSON.stringify(before),
+  );
+
   const first = await client.uploadImages([
-    { source_url: sourceUrl, content_type: "image/jpeg", bytes: bytes.toString("base64") },
+    { sourceUrl, contentType: "image/jpeg", body: bytes },
   ]);
 
   check(
-    "a 1 MB image survives base64 and the HMAC over the whole body",
+    "a 1 MB image survives the framed body and the HMAC over every byte of it",
     first[0]?.ok === true,
     JSON.stringify(first[0]),
   );
   check(
     "and comes back as a URL on the site itself",
     (first[0]?.url ?? "").startsWith(store.url) &&
-      (first[0]?.url ?? "").includes("/wp-content/uploads/"),
+      (first[0]?.url ?? "").includes("/wp-content/uploads/gop-import/"),
     first[0]?.url,
   );
   check(
-    "the server chose the filename, appending a hash of the source URL",
-    /\/e2e-wire-probe-[0-9a-f]{8}\.jpg$/.test(first[0]?.url ?? ""),
+    "the server chose the path: content-addressed, sharded, no YYYY/MM",
+    /\/gop-import\/[0-9a-f]{2}\/e2e-wire-probe-[0-9a-f]{8}\.jpg$/.test(first[0]?.url ?? "") &&
+      !/\/\d{4}\/\d{2}\//.test(first[0]?.url ?? ""),
     first[0]?.url,
   );
 
   /*
-   * The SECOND upload is the proof that the first one really wrote a file.
+   * NOW the probe must find it — and this is the assertion the whole optimisation
+   * rests on. If `present` cannot recognise what `upload` just wrote, every re-run
+   * downloads and sends the entire catalogue again while appearing to work.
+   */
+  const after = await client.imagesPresent([sourceUrl, `${imageHost}/never-sent.jpg`]);
+
+  check(
+    "and the probe now finds it, at exactly the URL the upload returned",
+    after[0]?.url === first[0]?.url,
+    `${after[0]?.url} vs ${first[0]?.url}`,
+  );
+  check(
+    "while a URL never sent is still null, so the probe is not answering yes to everything",
+    after[1]?.url === null,
+    JSON.stringify(after[1]),
+  );
+
+  /*
+   * The SECOND upload proves the first one really wrote a file, from the outside.
    *
-   * `skipped` is only ever true when the plugin found the file already on disk with
-   * a matching size — so this asserts the write happened, from the outside, without
-   * reaching into the container's filesystem. It is also the regression test for the
-   * `-1`, `-2` duplicates the old `/images/fetch` left behind on every retry.
+   * `skipped` is only ever true when the plugin found the file already on disk with a
+   * matching size. It is also the regression test for the `-1`, `-2` duplicates the
+   * old `/images/fetch` left behind on every retry.
    */
   const second = await client.uploadImages([
-    { source_url: sourceUrl, content_type: "image/jpeg", bytes: bytes.toString("base64") },
+    { sourceUrl, contentType: "image/jpeg", body: bytes },
   ]);
 
   check(
@@ -1367,12 +1408,47 @@ async function verifyImageUpload(store: Store, alice: TestAccount): Promise<void
     `${first[0]?.url} vs ${second[0]?.url}`,
   );
 
+  /*
+   * Several images in ONE framed body, of different types and sizes.
+   *
+   * The offsets in the manifest are cumulative, so this is what catches an off-by-one:
+   * the middle image would be written from inside its neighbour, and would still be a
+   * plausible file.
+   */
+  const png = Buffer.concat([
+    Buffer.from("\x89PNG\x0D\x0A\x1A\x0A", "binary"),
+    randomBytes(64 * 1024),
+  ]);
+  const small = Buffer.concat([
+    Buffer.from("GIF89a", "binary"),
+    randomBytes(4096),
+  ]);
+
+  const many = await client.uploadImages([
+    { sourceUrl: `${imageHost}/e2e-many-1.jpg`, contentType: "image/jpeg", body: bytes },
+    { sourceUrl: `${imageHost}/e2e-many-2.png`, contentType: "image/png", body: png },
+    { sourceUrl: `${imageHost}/e2e-many-3.gif`, contentType: "image/gif", body: small },
+  ]);
+
+  check(
+    "three images of different types in one body all land",
+    many.length === 3 && many.every((answer) => answer.ok),
+    JSON.stringify(many.map((answer) => [answer.ok, answer.error])),
+  );
+  check(
+    "and each keeps the extension its own BYTES imply, so no offset drifted",
+    (many[0]?.url ?? "").endsWith(".jpg") &&
+      (many[1]?.url ?? "").endsWith(".png") &&
+      (many[2]?.url ?? "").endsWith(".gif"),
+    JSON.stringify(many.map((answer) => answer.url)),
+  );
+
   // Bytes that are not an image are refused on the bytes, not on the label.
   const lying = await client.uploadImages([
     {
-      source_url: `${imageHost}/not-an-image.jpg`,
-      content_type: "image/jpeg",
-      bytes: Buffer.from("<!DOCTYPE html><title>404</title>").toString("base64"),
+      sourceUrl: `${imageHost}/not-an-image.jpg`,
+      contentType: "image/jpeg",
+      body: Buffer.from("<!DOCTYPE html><title>404</title>"),
     },
   ]);
 

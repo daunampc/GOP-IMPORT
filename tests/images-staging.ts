@@ -21,7 +21,13 @@
 
 import { ImageDownloadError, downloadImage } from "../lib/image-download";
 import { assertFetchableUrl } from "../lib/outbound-url";
-import { MAX_UPLOAD_ENTRIES, packRequests, uploadBudgetBytes } from "../lib/image-upload";
+import {
+  MAX_UPLOAD_ENTRIES,
+  PLUGIN_UPLOAD_CEILING_BYTES,
+  packRequests,
+  uploadBudgetBytes,
+} from "../lib/image-upload";
+import { downloadLanes } from "../lib/download-limit";
 import { createImageCache, stageImages } from "../lib/images";
 import type { GopClient, Product } from "../lib/gop-client";
 import { DEFAULT_IMPORT_OPTIONS, type ImportOptions } from "../lib/import-options";
@@ -56,19 +62,47 @@ async function refuses(name: string, body: () => Promise<unknown>, expect: RegEx
  * A GopClient that records what it was asked to upload and answers as the plugin
  * would. Only `uploadImages` is reachable from the code under test.
  */
+interface StubEntry {
+  sourceUrl: string;
+  contentType: string;
+  body: Buffer;
+}
+
 function stubClient(
   behaviour: {
     fail?: boolean;
     failWith?: string;
+    /** Source URLs the site claims to hold already, for the `/images/present` probe. */
+    present?: string[];
+    /** Make the probe throw, to prove a run still works without it. */
+    probeFails?: boolean;
   } = {},
 ): {
   client: GopClient;
-  requests: Array<Array<{ source_url: string; bytes: string; content_type: string }>>;
+  requests: StubEntry[][];
+  probes: string[][];
 } {
-  const requests: Array<Array<{ source_url: string; bytes: string; content_type: string }>> = [];
+  const requests: StubEntry[][] = [];
+  const probes: string[][] = [];
+
+  const localFor = (sourceUrl: string): string =>
+    `https://shop.test/wp-content/uploads/gop-import/ab/${encodeURIComponent(sourceUrl).slice(-24)}.jpg`;
 
   const client = {
-    async uploadImages(entries: Array<{ source_url: string; bytes: string; content_type: string }>) {
+    async imagesPresent(urls: string[]) {
+      probes.push(urls);
+
+      if (behaviour.probeFails === true) {
+        throw new Error("the site did not answer the probe");
+      }
+
+      return urls.map((url) => ({
+        source_url: url,
+        url: (behaviour.present ?? []).includes(url) ? localFor(url) : null,
+      }));
+    },
+
+    async uploadImages(entries: StubEntry[]) {
       requests.push(entries);
 
       if (behaviour.fail === true) {
@@ -77,14 +111,14 @@ function stubClient(
 
       return entries.map((entry) => ({
         ok: true,
-        source_url: entry.source_url,
-        url: `https://shop.test/wp-content/uploads/2026/08/${encodeURIComponent(entry.source_url).slice(-24)}.jpg`,
+        source_url: entry.sourceUrl,
+        url: localFor(entry.sourceUrl),
         skipped: false,
       }));
     },
   } as unknown as GopClient;
 
-  return { client, requests };
+  return { client, requests, probes };
 }
 
 function optionsFor(imageMode: ImportOptions["imageMode"]): ImportOptions {
@@ -242,8 +276,8 @@ async function main(): Promise<void> {
 
   check(
     "the budget never exceeds what the plugin accepts",
-    budget <= 22 * 1024 * 1024,
-    `budget is ${budget}`,
+    budget <= PLUGIN_UPLOAD_CEILING_BYTES,
+    `budget ${budget} against a ceiling of ${PLUGIN_UPLOAD_CEILING_BYTES}`,
   );
 
   {
@@ -284,20 +318,22 @@ async function main(): Promise<void> {
   }
 
   {
-    // Over the PLUGIN's ceiling, not merely over the packing budget: it can never be
-    // sent, and must be reported rather than put in a request that would 400.
+    // Bigger than the packing budget but still sendable: its own request, and it must
+    // not disturb whatever was being filled.
     const packed = packRequests([
+      { sourceUrl: "https://cdn.test/a.jpg", body: buffer(1024), contentType: "image/jpeg" },
       {
         sourceUrl: "https://cdn.test/huge.jpg",
-        body: buffer(23 * 1024 * 1024),
+        body: buffer(budget + 1024),
         contentType: "image/jpeg",
       },
+      { sourceUrl: "https://cdn.test/b.jpg", body: buffer(1024), contentType: "image/jpeg" },
     ]);
 
     check(
-      "an image over the plugin's ceiling is marked oversized, not sent",
-      packed.length === 1 && packed[0].oversized !== undefined && packed[0].images.length === 0,
-      JSON.stringify(packed.map((request) => request.images.length)),
+      "an image over the budget travels alone, and does not swallow its neighbours",
+      packed.length === 3 && packed.every((request) => request.images.length === 1),
+      packed.map((request) => request.images.length).join(", "),
     );
   }
 
@@ -317,11 +353,11 @@ async function main(): Promise<void> {
       JSON.stringify(staged.products[0].images),
     );
     check(
-      "the bytes were sent base64, with the content type the source gave",
-      requests[0][0].bytes.length > 0 &&
-        /^[A-Za-z0-9+/=]+$/.test(requests[0][0].bytes) &&
-        requests[0].some((entry) => entry.content_type === "image/png"),
-      JSON.stringify(requests[0].map((entry) => entry.content_type)),
+      "the bytes were sent RAW, not base64, with the content type the source gave",
+      Buffer.isBuffer(requests[0][0].body) &&
+        requests[0][0].body.byteLength > 0 &&
+        requests[0].some((entry) => entry.contentType === "image/png"),
+      JSON.stringify(requests[0].map((entry) => [entry.contentType, entry.body.byteLength])),
     );
   }
 
@@ -361,6 +397,136 @@ async function main(): Promise<void> {
       "and the product still publishes, with the original URL",
       (staged.products[0].images ?? [])[0] === `${IMAGE_HOST}/ok.jpg`,
       JSON.stringify(staged.products[0].images),
+    );
+  }
+
+  console.log("\nAsking the site first\n");
+
+  {
+    /*
+     * The single biggest saving available, and the reason `/images/present` exists: an
+     * image the site already holds is neither downloaded from its source nor sent.
+     */
+    const held = `${IMAGE_HOST}/ok.jpg`;
+    const notHeld = `${IMAGE_HOST}/also-ok.png`;
+    const before = await hitsFor("/ok.jpg");
+
+    const { client, requests, probes } = stubClient({ present: [held] });
+
+    const staged = await stageImages(
+      [productWith([held, notHeld])],
+      optionsFor("upload_site"),
+      client,
+      null,
+    );
+
+    check("the site was asked, once, about both images", probes.length === 1 && probes[0].length === 2);
+    check(
+      "the image it already had was NOT downloaded",
+      (await hitsFor("/ok.jpg")) - before === 0,
+      `the host was asked ${(await hitsFor("/ok.jpg")) - before} time(s)`,
+    );
+    check(
+      "and was NOT sent — only the other one was",
+      requests.length === 1 &&
+        requests[0].length === 1 &&
+        requests[0][0].sourceUrl === notHeld,
+      JSON.stringify(requests.map((request) => request.map((entry) => entry.sourceUrl))),
+    );
+    check(
+      "both products' images still point at the site",
+      (staged.products[0].images ?? []).every((url) => url.startsWith("https://shop.test/")),
+      JSON.stringify(staged.products[0].images),
+    );
+    check(
+      "and the saving is reported, so a re-run can be recognised as cheap",
+      staged.stats.alreadyOnSite === 1 && staged.stats.downloaded === 1,
+      JSON.stringify(staged.stats),
+    );
+  }
+
+  {
+    // The probe is an optimisation, so losing it must cost time and nothing else.
+    const { client, requests } = stubClient({ probeFails: true });
+
+    const staged = await stageImages(
+      [productWith([`${IMAGE_HOST}/ok.jpg`])],
+      optionsFor("upload_site"),
+      client,
+      null,
+    );
+
+    check(
+      "a site that cannot answer the probe still gets a working run",
+      staged.failures.length === 0 &&
+        requests.length === 1 &&
+        (staged.products[0].images ?? [])[0]?.startsWith("https://shop.test/") === true,
+      JSON.stringify({ failures: staged.failures, requests: requests.length }),
+    );
+    check(
+      "and nothing is claimed as already present",
+      staged.stats.alreadyOnSite === 0,
+      JSON.stringify(staged.stats),
+    );
+  }
+
+  console.log("\nDownloading and uploading at the same time\n");
+
+  {
+    /*
+     * The barrier is gone, and this is how that is visible without timing anything: an
+     * upload request must have been SENT while downloads were still running.
+     *
+     * With a budget forced low enough that each image fills a request, three images
+     * produce three requests; the old shape produced them only after every download had
+     * finished, so the first request could not have been in flight before the last
+     * download completed. Recording the order the stub sees proves the interleaving.
+     */
+    const previous = process.env.GOP_IMAGE_UPLOAD_BYTES;
+    process.env.GOP_IMAGE_UPLOAD_BYTES = "1";
+
+    try {
+      const { client, requests } = stubClient();
+
+      const staged = await stageImages(
+        [productWith([`${IMAGE_HOST}/ok.jpg`, `${IMAGE_HOST}/also-ok.png`, `${IMAGE_HOST}/to-ok.jpg`])],
+        optionsFor("upload_site"),
+        client,
+        null,
+      );
+
+      check(
+        "a tiny budget produces one request per image rather than one for the batch",
+        requests.length === 3,
+        `${requests.length} request(s)`,
+      );
+      check(
+        "every image still resolved",
+        staged.failures.length === 0 && staged.stats.uploaded === 3,
+        JSON.stringify({ failures: staged.failures, stats: staged.stats }),
+      );
+      check(
+        "and the cost report separates download time from upload time",
+        staged.stats.downloadMs > 0 && staged.stats.uploadMs >= 0 && staged.stats.requests === 3,
+        JSON.stringify(staged.stats),
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.GOP_IMAGE_UPLOAD_BYTES;
+      } else {
+        process.env.GOP_IMAGE_UPLOAD_BYTES = previous;
+      }
+    }
+  }
+
+  {
+    // The whole point of a global ceiling: it is not multiplied by the run's lanes.
+    const lanes = downloadLanes();
+
+    check(
+      "the download ceiling is a process-wide number, and a sane one",
+      lanes >= 1 && lanes <= 64,
+      `${lanes}`,
     );
   }
 

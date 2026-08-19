@@ -510,25 +510,49 @@ export class GopClient {
    *
    * Replaced `fetchImages`, which sent a list of URLs to `/images/fetch` and had the
    * site's PHP fetch each one. That endpoint no longer exists: plugin 3.9.0 removed
-   * it, along with every outbound call the plugin used to make. A site below 3.9.0
-   * answers this route with `unknown_route`, which is why callers must gate on
+   * it, along with every outbound call the plugin used to make. Callers must gate on
    * `imageUploadSupport` first — see `lib/plugin-version.ts`.
    *
-   * `bytes` is base64. It makes the body a third larger, and it is the only encoding
-   * that works: the HMAC covers the whole body and the plugin reads it from
-   * `php://input`, which PHP leaves EMPTY for multipart/form-data.
+   * THE BODY IS FRAMED, NOT JSON, and the reason is bytes:
+   *
+   *     {"images":[{"source_url":"…","content_type":"image/jpeg","length":184320}]}\n
+   *     <184320 raw bytes><the next image's raw bytes>…
+   *
+   * 3.9.0 sent the bytes base64 inside JSON, which costs a third of the wire on every
+   * image-heavy run — 2.00 MB of JPEG becomes 2.67 MB, measured — plus an encode here
+   * and a decode there, and it capped one image at 22 MB because 4/3 of more than that
+   * does not fit in a 32 MB body. Gzip is not the answer either: a JPEG is already
+   * compressed, so gzipping its base64 only removes the padding base64 just added, at
+   * ~92ms of CPU per 2 MB on each side.
+   *
+   * Raw bytes need no new signing scheme, which is the point. `Auth::verify` signs
+   * `method \n path \n timestamp \n body` and the plugin reads the body from
+   * `php://input`, which is binary safe — so the HMAC still covers every image byte.
+   * multipart/form-data is the option that CANNOT work: PHP parses it into `$_FILES`
+   * and leaves `php://input` empty, so the signature would fail on every request.
    */
   async uploadImages(
-    entries: Array<{
-      source_url: string;
-      content_type: string;
-      bytes: string;
-      file_name?: string;
-      id_multisite?: string;
-    }>,
+    images: Array<{ sourceUrl: string; contentType: string; body: Buffer }>,
   ): Promise<
     Array<{ ok: boolean; url?: string; source_url?: string; error?: string; skipped?: boolean }>
   > {
+    const manifest = Buffer.from(
+      JSON.stringify({
+        images: images.map((image) => ({
+          source_url: image.sourceUrl,
+          content_type: image.contentType,
+          length: image.body.byteLength,
+        })),
+      }),
+      'utf8',
+    );
+
+    const payload = Buffer.concat([
+      manifest,
+      Buffer.from('\n', 'utf8'),
+      ...images.map((image) => image.body),
+    ]);
+
     const response = await this.request<{
       images: Array<{
         ok: boolean;
@@ -537,7 +561,38 @@ export class GopClient {
         error?: string;
         skipped?: boolean;
       }>;
-    }>('POST', '/images/upload', { images: entries });
+    }>('POST', '/images/upload', payload);
+
+    return response.images;
+  }
+
+  /**
+   * Which of these images the site already holds.
+   *
+   * The cheapest question in the client and the most valuable one on a re-run. Every
+   * URL it answers with is an image this process then does NOT download from its
+   * source and does NOT send to the site — for a catalogue being re-synced, most of
+   * the traffic of a run.
+   *
+   * It works because the path an image lands at is a pure function of its source URL
+   * (see `ImageWriter::pathFor`). Under the dated `YYYY/MM` layout 3.9.0 used, the
+   * same image re-imported the following month landed somewhere else, so there was
+   * nothing to look up.
+   *
+   * `null` for a URL always means "send it" — never a claim that the site lacks it
+   * for certain. Being wrong that way costs bandwidth; being wrong the other way
+   * would publish a URL serving nothing.
+   *
+   * Needs plugin 3.10.0. Gate with `imageUploadSupport` as `uploadImages` does; an
+   * older build answers `unknown_route`.
+   */
+  async imagesPresent(
+    sourceUrls: string[],
+  ): Promise<Array<{ source_url: string; url: string | null }>> {
+    const response = await this.request<{
+      images: Array<{ source_url: string; url: string | null }>;
+    }>('POST', '/images/present', { images: sourceUrls });
+
     return response.images;
   }
 
@@ -708,6 +763,14 @@ export class GopClient {
       max_image_upload_bytes?: number;
       php_memory_limit?: string;
       /**
+       * `"binary"` from 3.10.0, absent before it.
+       *
+       * Reported so a build that takes raw bytes can be told from one that took
+       * base64 without inferring it from the version string — the version gate is
+       * still what decides, this is for the Sites screen and for diagnosis.
+       */
+      image_framing?: string;
+      /**
        * The site's activation state — a FINGERPRINT of its key, never the key.
        *
        * Optional because a plugin from before activation existed does not send it,
@@ -724,14 +787,40 @@ export class GopClient {
     }>('GET', '/health');
   }
 
-  private async request<T>(method: 'GET' | 'POST', route: string, body?: unknown): Promise<T> {
-    const payload = body === undefined ? '' : JSON.stringify(body);
+  /**
+   * One request, signed.
+   *
+   * `body` is either a value to JSON-encode, or a `Buffer` to send verbatim — which
+   * is what `/images/upload` needs, because its body is a manifest followed by raw
+   * image bytes and JSON cannot carry those without base64 inflating them by a third.
+   */
+  private async request<T>(
+    method: 'GET' | 'POST',
+    route: string,
+    body?: unknown,
+  ): Promise<T> {
+    const binary = Buffer.isBuffer(body);
+
+    const payload: Buffer =
+      body === undefined
+        ? Buffer.alloc(0)
+        : binary
+          ? body
+          : Buffer.from(JSON.stringify(body), 'utf8');
+
     const timestamp = Math.floor(Date.now() / 1000).toString();
 
-    // The signature covers the route but NOT the query string — it has to match
-    // how the plugin rebuilds the string on its side.
+    /*
+     * The signature covers the route but NOT the query string — it has to match how
+     * the plugin rebuilds the string on its side.
+     *
+     * Hashed as BYTES rather than as a template string, because a body of image bytes
+     * is not valid UTF-8: interpolating it would replace every invalid sequence with
+     * U+FFFD and sign something the site never received.
+     */
     const signature = createHmac('sha256', this.site.apiSecret)
-      .update(`${method}\n${route}\n${timestamp}\n${payload}`)
+      .update(Buffer.from(`${method}\n${route}\n${timestamp}\n`, 'utf8'))
+      .update(payload)
       .digest('hex');
 
     const url = new URL(`${this.site.baseUrl.replace(/\/$/, '')}/index.php`);
@@ -753,6 +842,20 @@ export class GopClient {
         ? deadline
         : AbortSignal.any([deadline, this.options.signal]);
 
+    /*
+     * A view, not a copy. `fetch` types its body as `BodyInit`, which accepts a
+     * `BufferSource` but not Node's `Buffer` — and `new Uint8Array(payload)` would
+     * duplicate up to 24 MB of image bytes for the sake of a type. This aliases the
+     * same memory.
+     */
+    const bodyInit =
+      payload.byteLength === 0
+        ? undefined
+        : // `Buffer.buffer` is typed `ArrayBufferLike` because in principle it could be
+          // a `SharedArrayBuffer`, which `BodyInit` does not accept. Nothing here ever
+          // allocates one, so the assertion is about the type and not about the value.
+          new Uint8Array(payload.buffer as ArrayBuffer, payload.byteOffset, payload.byteLength);
+
     let response: Response;
     let text: string;
 
@@ -760,12 +863,12 @@ export class GopClient {
       response = await fetch(url, {
         method,
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type': binary ? 'application/octet-stream' : 'application/json',
           'X-TSD-Key': this.site.apiKey,
           'X-TSD-Timestamp': timestamp,
           'X-TSD-Signature': signature,
         },
-        body: method === 'POST' ? payload : undefined,
+        body: method === 'POST' ? bodyInit : undefined,
         signal,
       });
 

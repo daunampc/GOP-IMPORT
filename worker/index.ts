@@ -41,7 +41,9 @@ import {
   stageImages,
   type ImageCache,
   type ImageFailure,
+  type ImageStageStats,
 } from "../lib/images";
+import { downloadLanes, downloadStats, resetDownloadStats } from "../lib/download-limit";
 import { describeEdit, type EditOptions } from "../lib/edit-options";
 import { logJob } from "../lib/job-log";
 import { notifyRunFinished } from "../lib/notify";
@@ -359,6 +361,58 @@ async function runJob(job: Job<{ jobId: string }>): Promise<void> {
 
 
 /**
+ * What this batch's images cost, and where the time went.
+ *
+ * Logged because the tuning knobs are otherwise unturnable. "The run is slow" has at
+ * least four different answers here — the source is slow, the shop's uplink is slow,
+ * the images are enormous, or the run is re-sending images the site already has — and
+ * they need opposite responses. `alreadyOnSite` in particular is the number that says
+ * whether a re-run is nearly free.
+ *
+ * Skipped entirely when a batch had no images, rather than logging a row of zeroes on
+ * every batch of a catalogue that uses `keep_remote`.
+ */
+async function logImageCost(
+  jobId: string,
+  batchIndex: number,
+  stats: ImageStageStats,
+): Promise<void> {
+  if (stats.total === 0) {
+    return;
+  }
+
+  const mb = (bytes: number): string => (bytes / 1024 / 1024).toFixed(1);
+
+  const parts = [`${stats.total} image(s)`];
+
+  if (stats.fromCache > 0) {
+    parts.push(`${stats.fromCache} already resolved earlier in this run`);
+  }
+  if (stats.alreadyOnSite > 0) {
+    parts.push(`${stats.alreadyOnSite} already on the site (neither downloaded nor sent)`);
+  }
+  if (stats.downloaded > 0) {
+    parts.push(`${stats.downloaded} downloaded (${mb(stats.downloadedBytes)} MB in ${stats.downloadMs}ms)`);
+  }
+  if (stats.uploaded > 0) {
+    parts.push(
+      `${stats.uploaded} sent in ${stats.requests} request(s) ` +
+        `(${mb(stats.uploadedBytes)} MB in ${stats.uploadMs}ms)`,
+    );
+  }
+  if (stats.skippedBySite > 0) {
+    parts.push(`${stats.skippedBySite} the site already had byte for byte`);
+  }
+
+  await logJob(jobId, {
+    stage: "images",
+    batchIndex,
+    message: parts.join("; ") + ".",
+    detail: { ...stats },
+  });
+}
+
+/**
  * The image-failure log line, with the two causes SEPARATED.
  *
  * The counts are what make this worth a helper rather than a template string.
@@ -520,6 +574,10 @@ async function runImport(
    */
   const imageCache = createImageCache();
 
+  // Process-wide counters, so the summary below reports THIS run rather than the
+  // lifetime of the worker.
+  resetDownloadStats();
+
   // Batch size is the operator's choice but capped by the plugin — anything
   // larger is rejected wholesale with `batch_too_large`.
   const batchSize = Math.max(1, Math.min(options.batchSize ?? MAX_BATCH_SIZE, MAX_BATCH_SIZE));
@@ -529,13 +587,17 @@ async function runImport(
     message:
       `Import options: ${options.mode} mode, "${WRITE_MODE_LABELS[options.writeMode]}", ` +
       `images "${options.imageMode}", ${options.threads} parallel lane(s), ` +
-      `${batchSize} product(s) per batch.`,
+      `${batchSize} product(s) per batch` +
+      (options.imageMode === "keep_remote"
+        ? "."
+        : `, at most ${downloadLanes()} image download(s) at once.`),
     detail: {
       mode: options.mode,
       writeMode: options.writeMode,
       imageMode: options.imageMode,
       threads: options.threads,
       batchSize,
+      downloadLanes: options.imageMode === "keep_remote" ? null : downloadLanes(),
       flattenVariants: options.flattenVariants,
       skipRepeatedSku: options.skipRepeatedSku,
     },
@@ -568,6 +630,7 @@ async function runImport(
       // before its products are created.
       const staged = await stageImages(batch, options, client, s3, imageCache);
 
+      await logImageCost(jobId, Math.floor(offset / batchSize), staged.stats);
       await logImageFailures(jobId, Math.floor(offset / batchSize), staged.failures);
 
       let pluginElapsedMs: number | null = null;
@@ -604,6 +667,32 @@ async function runImport(
   // prices on category pages.
   if (outcome.succeeded > 0) {
     await clearTransients(client, jobId);
+  }
+
+  /*
+   * Did the download ceiling ever actually bite?
+   *
+   * `queued: 0` means it never did, and raising `GOP_IMAGE_DOWNLOAD_LANES` would change
+   * nothing about this run — which is the answer to the question an operator asks
+   * first, and the one they otherwise have to guess at. A large `waitedMs` says the
+   * opposite: the sources could have been read faster than the ceiling allowed.
+   *
+   * Logged once per run rather than per batch, because it is a property of the process.
+   */
+  if (options.imageMode !== "keep_remote") {
+    const limit = downloadStats();
+
+    await logJob(jobId, {
+      stage: "images",
+      message:
+        limit.queued === 0
+          ? `The image download ceiling of ${downloadLanes()} was never reached (peak ${limit.peak}), ` +
+            `so raising it would not have made this run faster.`
+          : `${limit.queued} download(s) waited for a slot, ${Math.round(limit.waitedMs / 1000)}s in ` +
+            `total, against a ceiling of ${downloadLanes()}. Raising GOP_IMAGE_DOWNLOAD_LANES may ` +
+            `help if the link is not already saturated.`,
+      detail: { ...limit, ceiling: downloadLanes() },
+    });
   }
 }
 
@@ -767,6 +856,7 @@ async function runWriteMode(
     // then throw it away.
     const staged = await stageImages(fresh, options, client, s3, imageCache);
 
+    await logImageCost(jobId, batchIndex, staged.stats);
     await logImageFailures(jobId, batchIndex, staged.failures);
 
     const created = await client.importProducts(staged.products, {

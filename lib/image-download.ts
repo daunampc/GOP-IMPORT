@@ -2,6 +2,7 @@
  * Do NOT import "server-only" here — this module is in the worker's import graph.
  */
 
+import { withDownloadSlot } from "./download-limit";
 import { OutboundUrlError, assertFetchableUrl } from "./outbound-url";
 
 /**
@@ -24,6 +25,11 @@ import { OutboundUrlError, assertFetchableUrl } from "./outbound-url";
  * a URL pointing at an internal address only ever reached the customer's own network.
  * Now OUR worker does the fetching, from URLs typed into a CSV — and unlike the
  * preview, this path keeps the BODY.
+ *
+ * CONCURRENCY IS NOT DECIDED HERE EITHER. Every call takes a slot from
+ * `lib/download-limit.ts`, which caps the whole process. It has to be global: the
+ * per-batch figure used to be multiplied by the run's lane count without anyone
+ * choosing the product, and 32 lanes made it 256 downloads at once.
  */
 
 /** Bytes. An image larger than this is almost certainly not an image. */
@@ -71,6 +77,16 @@ async function checkedUrl(raw: string): Promise<URL> {
 export async function downloadImage(
   sourceUrl: string,
   options: DownloadOptions = {},
+): Promise<DownloadedImage> {
+  // The slot covers the DNS lookup and the redirect chain too, not only the transfer:
+  // a name that takes three seconds to resolve occupies the link's attention just as
+  // a slow body does.
+  return withDownloadSlot(() => download(sourceUrl, options));
+}
+
+async function download(
+  sourceUrl: string,
+  options: DownloadOptions,
 ): Promise<DownloadedImage> {
   const maxBytes = options.maxBytes ?? MAX_IMAGE_BYTES;
 
