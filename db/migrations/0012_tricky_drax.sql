@@ -1,0 +1,1 @@
+ALTER TABLE "account_limit" ADD COLUMN "product_edit_enabled" boolean DEFAULT true NOT NULL;

@@ -1,0 +1,2 @@
+ALTER TABLE "settings" ADD COLUMN "notify_telegram_token_encrypted" text DEFAULT '' NOT NULL;--> statement-breakpoint
+ALTER TABLE "settings" ADD COLUMN "notify_telegram_chat_id" text DEFAULT '' NOT NULL;

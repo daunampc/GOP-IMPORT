@@ -39,3 +39,20 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# database backups taken before destructive migrations
+/backup/
+
+# test artefacts
+/.isolation-server.log
+/.e2e-run.log
+/.cancel-run.log
+/.cancel-worker.log
+
+# pnpm's local content-addressable store — 554 MB of package tarballs, rebuildable
+# from the lockfile. `pnpm-workspace.yaml` points the store here.
+/.pnpm-store/
+
+# The plugin copy tests/e2e.sh stages, whose config/config.ini it writes with the
+# test API key AND SECRET. Rebuilt from $PLUGIN_DIR on every run.
+/.e2e-plugin/

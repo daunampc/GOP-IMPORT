@@ -1,0 +1,1 @@
+ALTER TABLE "license_key" ADD COLUMN "valid_days" integer;

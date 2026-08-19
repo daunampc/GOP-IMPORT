@@ -1,0 +1,1 @@
+ALTER TABLE "job" ADD CONSTRAINT "job_schedule_id_job_schedule_id_fk" FOREIGN KEY ("schedule_id") REFERENCES "public"."job_schedule"("id") ON DELETE set null ON UPDATE no action;

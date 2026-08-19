@@ -1,26 +1,560 @@
 @import "tailwindcss";
 
+/* ============================================================================
+   THE DESIGN SYSTEM — the single source of truth for colour, type, spacing,
+   radii, shadow and motion.
+   ----------------------------------------------------------------------------
+   The rule: screens NEVER write a colour literal or a raw colour class. They
+   use the tokens declared here, through the components in `components/ui`.
+
+   How that is enforced: the `@theme` block below opens with `--color-*:
+   initial`, which erases Tailwind's default palette. After that a class naming
+   one of Tailwind's own scales does not exist — writing one generates no CSS at
+   all. This is a compile-time fence, not a convention.
+
+   The audit for it is a grep, so this comment deliberately does not spell any
+   such class out — a note about the rule should not fail the check for it:
+
+     grep -rnE '\b(bg|text|border)-(slate|gray|red|blue|emerald|amber)-[0-9]{2,3}\b' app components
+
+   Three theme states:
+     - `data-theme="light"`  → always light
+     - `data-theme="dark"`   → always dark
+     - no attribute          → follows the system's `prefers-color-scheme`
+   ========================================================================== */
+
+/* --------------------------------------------------------------- LIGHT THEME
+   A bright, cool paper (hue ~225) rather than the warm parchment this replaced,
+   with near-black ink and a clearer violet accent. Surfaces are pure white, so
+   panels lift off the canvas without needing a heavier border.
+
+   Measured contrast (against the surface each token actually sits on):
+     ink        on canvas          16.64:1
+     ink        on surface         17.68:1
+     ink-muted  on canvas           6.79:1
+     ink-subtle on canvas           5.07:1
+     ink-subtle on surface-sunken   4.77:1
+     field-line on surface          3.06:1   (WCAG 1.4.11, input borders)
+     *-fg       on canvas          >= 5.83:1
+     *-fg       on *-soft          >= 5.53:1   (badges, alerts)
+     on-*       on the solid tone  >= 5.32:1
+*/
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: light;
+
+  --canvas: #f6f8fd;
+  --canvas-deep: #e9edf7;
+  --surface: #ffffff;
+  --surface-raised: #ffffff;
+  --surface-sunken: #eef1f9;
+  --overlay: rgb(18 22 38 / 0.42);
+
+  --line: #dfe4f0;
+  --line-strong: #aab2c7;
+  --field: #ffffff;
+  --field-line: #8b93ac;
+  --field-line-strong: #636b84;
+
+  --ink: #151824;
+  --ink-muted: #4e576e;
+  --ink-subtle: #616a83;
+  --ink-inverse: #ffffff;
+
+  --accent: #5b45e0;
+  --accent-hover: #4c37cc;
+  --accent-active: #3f2cb0;
+  --on-accent: #ffffff;
+  --accent-soft: #ecebfe;
+  --accent-border: #c3bcfa;
+  --accent-fg: #4a35c4;
+
+  --ok: #0a7a53;
+  --on-ok: #ffffff;
+  --ok-soft: #e2f7ee;
+  --ok-border: #9adcc2;
+  --ok-fg: #0b6f4c;
+
+  --warn: #8f5900;
+  --on-warn: #ffffff;
+  --warn-soft: #fdf0d8;
+  --warn-border: #eecb8e;
+  --warn-fg: #845200;
+
+  --bad: #c8322c;
+  --on-bad: #ffffff;
+  --bad-soft: #feecea;
+  --bad-border: #f8b4ae;
+  --bad-fg: #a92e28;
+
+  --info: #07708f;
+  --on-info: #ffffff;
+  --info-soft: #e2f3fb;
+  --info-border: #9ed5ec;
+  --info-fg: #0a6386;
+
+  --focus: #5b45e0;
+
+  --chart-1: #5b45e0;
+  --chart-2: #07708f;
+  --chart-3: #0a7a53;
+  --chart-4: #8f5900;
+  --chart-5: #c8322c;
+
+  --shadow-tint: 22 28 52;
+  --shadow-alpha-1: 0.05;
+  --shadow-alpha-2: 0.09;
+  --shadow-alpha-3: 0.14;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+/* ---------------------------------------------------------------- DARK THEME
+   Not an inversion: the ground is a deep blue-charcoal rather than pure black,
+   and the solid tones are lifted while the text ON them FLIPS to dark ink —
+   white on a bright green or amber does not reach 4.5:1.
 
+   Measured contrast:
+     ink        on canvas         15.95:1
+     ink        on surface        14.51:1
+     ink-muted  on canvas          8.50:1
+     ink-subtle on canvas          5.78:1
+     ink-subtle on surface         5.25:1
+     field-line on surface         3.59:1
+     *-fg       on canvas         >= 8.87:1
+     *-fg       on *-soft         >= 7.82:1
+     on-*       on the solid tone >= 4.92:1
+*/
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+
+--canvas: #14161f;
+    --canvas-deep: #0e1017;
+    --surface: #1c1f2b;
+    --surface-raised: #242838;
+    --surface-sunken: #111320;
+    --overlay: rgb(6 8 14 / 0.66);
+
+    --line: #2f3446;
+    --line-strong: #474e66;
+    --field: #20242f;
+    --field-line: #6d7590;
+    --field-line-strong: #8b93ad;
+
+    --ink: #eef1f8;
+    --ink-muted: #aab2c6;
+    --ink-subtle: #8892a8;
+    --ink-inverse: #14161f;
+
+    --accent: #7c66ff;
+    --accent-hover: #8f7cff;
+    --accent-active: #6a52f0;
+    --on-accent: #0b0718;
+    --accent-soft: #211d43;
+    --accent-border: #403a7d;
+    --accent-fg: #b9abff;
+
+    --ok: #2bbd83;
+    --on-ok: #04130c;
+    --ok-soft: #0e2a1f;
+    --ok-border: #1d503a;
+    --ok-fg: #5fe0aa;
+
+    --warn: #e5a53a;
+    --on-warn: #1a1204;
+    --warn-soft: #2c2211;
+    --warn-border: #57431d;
+    --warn-fg: #f4c877;
+
+    --bad: #f0635c;
+    --on-bad: #1c0b0a;
+    --bad-soft: #2e1615;
+    --bad-border: #602d2a;
+    --bad-fg: #ffa39d;
+
+    --info: #3fb3d9;
+    --on-info: #04161d;
+    --info-soft: #0f2733;
+    --info-border: #1d4c5f;
+    --info-fg: #7fd6f0;
+
+    --focus: #a08cff;
+
+    --chart-1: #a08cff;
+    --chart-2: #3fb3d9;
+    --chart-3: #2bbd83;
+    --chart-4: #e5a53a;
+    --chart-5: #f0635c;
+
+    --shadow-tint: 0 0 0;
+    --shadow-alpha-1: 0.42;
+    --shadow-alpha-2: 0.52;
+    --shadow-alpha-3: 0.64;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* An explicit choice by the reader wins in both directions. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+--canvas: #14161f;
+  --canvas-deep: #0e1017;
+  --surface: #1c1f2b;
+  --surface-raised: #242838;
+  --surface-sunken: #111320;
+  --overlay: rgb(6 8 14 / 0.66);
+
+  --line: #2f3446;
+  --line-strong: #474e66;
+  --field: #20242f;
+  --field-line: #6d7590;
+  --field-line-strong: #8b93ad;
+
+  --ink: #eef1f8;
+  --ink-muted: #aab2c6;
+  --ink-subtle: #8892a8;
+  --ink-inverse: #14161f;
+
+  --accent: #7c66ff;
+  --accent-hover: #8f7cff;
+  --accent-active: #6a52f0;
+  --on-accent: #0b0718;
+  --accent-soft: #211d43;
+  --accent-border: #403a7d;
+  --accent-fg: #b9abff;
+
+  --ok: #2bbd83;
+  --on-ok: #04130c;
+  --ok-soft: #0e2a1f;
+  --ok-border: #1d503a;
+  --ok-fg: #5fe0aa;
+
+  --warn: #e5a53a;
+  --on-warn: #1a1204;
+  --warn-soft: #2c2211;
+  --warn-border: #57431d;
+  --warn-fg: #f4c877;
+
+  --bad: #f0635c;
+  --on-bad: #1c0b0a;
+  --bad-soft: #2e1615;
+  --bad-border: #602d2a;
+  --bad-fg: #ffa39d;
+
+  --info: #3fb3d9;
+  --on-info: #04161d;
+  --info-soft: #0f2733;
+  --info-border: #1d4c5f;
+  --info-fg: #7fd6f0;
+
+  --focus: #a08cff;
+
+  --chart-1: #a08cff;
+  --chart-2: #3fb3d9;
+  --chart-3: #2bbd83;
+  --chart-4: #e5a53a;
+  --chart-5: #f0635c;
+
+  --shadow-tint: 0 0 0;
+  --shadow-alpha-1: 0.42;
+  --shadow-alpha-2: 0.52;
+  --shadow-alpha-3: 0.64;
+}
+
+/* ============================================================================
+   Registering the tokens with Tailwind.
+   `inline` is required: it emits `background-color: var(--surface)` rather than
+   copying the value, which is what lets a theme switch at runtime move every
+   utility with it.
+   ========================================================================== */
+@theme inline {
+  /* Erase the default palette — see the note at the top of this file. */
+  --color-*: initial;
+
+  --color-transparent: transparent;
+  --color-current: currentColor;
+  --color-inherit: inherit;
+  --color-white: #ffffff;
+  --color-black: #000000;
+
+  --color-canvas: var(--canvas);
+  --color-canvas-deep: var(--canvas-deep);
+  --color-surface: var(--surface);
+  --color-surface-raised: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-overlay: var(--overlay);
+
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-field: var(--field);
+  --color-field-line: var(--field-line);
+  --color-field-line-strong: var(--field-line-strong);
+
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
+  --color-ink-inverse: var(--ink-inverse);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-active: var(--accent-active);
+  --color-on-accent: var(--on-accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-border: var(--accent-border);
+  --color-accent-fg: var(--accent-fg);
+
+  --color-ok: var(--ok);
+  --color-on-ok: var(--on-ok);
+  --color-ok-soft: var(--ok-soft);
+  --color-ok-border: var(--ok-border);
+  --color-ok-fg: var(--ok-fg);
+
+  --color-warn: var(--warn);
+  --color-on-warn: var(--on-warn);
+  --color-warn-soft: var(--warn-soft);
+  --color-warn-border: var(--warn-border);
+  --color-warn-fg: var(--warn-fg);
+
+  --color-bad: var(--bad);
+  --color-on-bad: var(--on-bad);
+  --color-bad-soft: var(--bad-soft);
+  --color-bad-border: var(--bad-border);
+  --color-bad-fg: var(--bad-fg);
+
+  --color-info: var(--info);
+  --color-on-info: var(--on-info);
+  --color-info-soft: var(--info-soft);
+  --color-info-border: var(--info-border);
+  --color-info-fg: var(--info-fg);
+
+  --color-focus: var(--focus);
+
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+
+  /* Type — a denser scale than the default, one step down throughout. */
+  --font-sans: var(--font-be-vietnam), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, monospace;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.125rem;
+  --text-sm: 0.8125rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base: 0.9375rem;
+  --text-base--line-height: 1.4375rem;
+  --text-lg: 1.0625rem;
+  --text-lg--line-height: 1.5rem;
+  --text-xl: 1.25rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl: 1.5rem;
+  --text-2xl--line-height: 1.9375rem;
+  --text-3xl: 1.9375rem;
+  --text-3xl--line-height: 2.25rem;
+
+  /* Spacing — a 4px step, left as Tailwind's own so `gap-3` still means what it does everywhere else. */
+  --spacing: 0.25rem;
+
+  /* Radii — softer than a uniform 4px everywhere. */
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.625rem;
+  --radius-lg: 0.875rem;
+  --radius-xl: 1.125rem;
+  --radius-2xl: 1.5rem;
+  --radius-full: 9999px;
+
+  /* Shadows tinted towards the ground rather than pure black. */
+  --shadow-xs: 0 1px 2px rgb(var(--shadow-tint) / var(--shadow-alpha-1));
+  --shadow-sm:
+    0 1px 2px rgb(var(--shadow-tint) / var(--shadow-alpha-1)),
+    0 2px 6px -2px rgb(var(--shadow-tint) / var(--shadow-alpha-1));
+  --shadow-md:
+    0 2px 4px -1px rgb(var(--shadow-tint) / var(--shadow-alpha-1)),
+    0 8px 20px -6px rgb(var(--shadow-tint) / var(--shadow-alpha-2));
+  --shadow-lg:
+    0 4px 8px -2px rgb(var(--shadow-tint) / var(--shadow-alpha-2)),
+    0 20px 40px -12px rgb(var(--shadow-tint) / var(--shadow-alpha-3));
+  --shadow-none: none;
+
+  /* Motion — short and restrained. */
+  --duration-fast: 120ms;
+  --duration-base: 200ms;
+  --duration-slow: 320ms;
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out-soft: cubic-bezier(0.65, 0, 0.35, 1);
+
+  --animate-fade-in: fade-in var(--duration-base) var(--ease-out-soft);
+  --animate-rise: rise var(--duration-base) var(--ease-out-soft);
+  --animate-slide-left: slide-left var(--duration-slow) var(--ease-out-soft);
+  --animate-spin-slow: spin 900ms linear infinite;
+  --animate-pulse-soft: pulse-soft 1.6s var(--ease-in-out-soft) infinite;
+  --animate-sweep: sweep 1.4s linear infinite;
+}
+
+/* Tailwind v4 has no `--duration-*` theme namespace (only `--ease-*` and
+   `--animate-*`), so the duration scale has to be declared as utilities. Without
+   these three, `duration-fast` is a dead class that generates no CSS. */
+@utility duration-fast {
+  transition-duration: var(--duration-fast);
+}
+
+@utility duration-base {
+  transition-duration: var(--duration-base);
+}
+
+@utility duration-slow {
+  transition-duration: var(--duration-slow);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+@keyframes slide-left {
+  from {
+    transform: translateX(100%);
+  }
+}
+
+@keyframes pulse-soft {
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@keyframes sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* ============================================================================
+   Base
+   ========================================================================== */
+@layer base {
+  * {
+    border-color: var(--line);
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--canvas);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    font-size: var(--text-base);
+    line-height: var(--text-base--line-height);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* One focus rule for the whole application. No component may switch it off. */
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  ::selection {
+    background-color: var(--accent-soft);
+    color: var(--accent-fg);
+  }
+
+  /* Scrollbars blend into the ground rather than cutting a white stripe through a dark interface. */
+  * {
+    scrollbar-color: var(--line-strong) transparent;
+    scrollbar-width: thin;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--line-strong);
+    border: 3px solid transparent;
+    border-radius: var(--radius-full);
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--ink-subtle);
+  }
+
+  /* Browsers draw the date picker and spinner glyphs in a fixed light colour;
+     force them to follow the theme, or the dark theme gets black marks on a
+     black field. */
+  input[type="date"]::-webkit-calendar-picker-indicator,
+  input[type="number"]::-webkit-inner-spin-button {
+    filter: invert(var(--icon-invert, 0));
+  }
+
+  :root[data-theme="dark"] {
+    --icon-invert: 1;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --icon-invert: 1;
+    }
+  }
+}
+
+@layer utilities {
+  /* A horizontal scroll frame for wide tables — the table scrolls inside its
+     own frame and does NOT push the page off screen. */
+  .scroll-frame {
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+  }
+
+  .skeleton-sweep {
+    background-image: linear-gradient(
+      90deg,
+      var(--surface-sunken) 0%,
+      var(--line) 50%,
+      var(--surface-sunken) 100%
+    );
+    background-size: 200% 100%;
+    animation: var(--animate-sweep);
+  }
+
+  /* Figures line up in columns — it matters in a results table thousands of rows deep. */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Respect anyone who turned animation off at the operating-system level. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "job" ADD COLUMN "scheduled_for" timestamp with time zone;
