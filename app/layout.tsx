@@ -48,7 +48,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en" className={`${sans.variable} ${mono.variable}`} suppressHydrationWarning>
 
-      <body>
+      <body className="overflow-hidden">
         <ThemeScript />
         {children}</body>
     </html>

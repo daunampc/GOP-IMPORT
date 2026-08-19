@@ -81,6 +81,7 @@ module.exports = {
        */
       script: "node_modules/.bin/tsx",
       args: "--env-file=.env worker/index.ts",
+      interpreter: "none",
 
       /*
        * ONE worker process, and this one is not a preference.
