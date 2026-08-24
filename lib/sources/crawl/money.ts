@@ -58,7 +58,10 @@ export function fromMinorUnits(value: number | string, minorUnit: number): strin
  *
  * Two decimal places out, because that is what a shop displays. The rate itself
  * is recorded on the run — see `lib/crawl-options.ts` — so the number here can
- * always be re-derived from what the operator actually typed.
+ * always be re-derived from what the operator actually typed. The multiplication
+ * itself happens on an integer number of hundredths, not on the decimal amount,
+ * so a half-way result is decided by a rounding rule rather than by a binary
+ * floating-point artefact.
  */
 export function convert(amount: string, rate: number): string {
   if (!Number.isFinite(rate) || rate <= 0) {
@@ -70,5 +73,17 @@ export function convert(amount: string, rate: number): string {
     throw new CrawlMoneyError(`Not a price: ${JSON.stringify(amount)}.`);
   }
 
-  return (value * rate).toFixed(2);
+  /*
+   * Scale to an integer BEFORE multiplying, so a half-way result is decided by
+   * a rounding rule rather than by a binary artefact.
+   *
+   * 19.99 x 0.5 is 9.995, which money rounds up to 10.00. Computed as
+   * `19.99 * 0.5` the double is 9.994999999999999, and `.toFixed(2)` answers
+   * "9.99" — a cent lost to the representation. As `1999 * 0.5` the result is
+   * 999.5 exactly, and `Math.round` takes it to 1000.
+   */
+  const hundredths = Math.round(value * 100);
+  const converted = Math.round(hundredths * rate);
+
+  return (converted / 100).toFixed(2);
 }
