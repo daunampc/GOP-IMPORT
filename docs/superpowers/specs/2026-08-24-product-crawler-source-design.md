@@ -215,6 +215,10 @@ Khi bật, trên VPS cần: `pnpm exec playwright install --with-deps chromium`
 Dùng chung **một** browser context cho cả run, đóng lại khi run kết thúc — kể cả
 khi run bị huỷ.
 
+> **Có đường thứ hai cho đường chậm.** §12 mô tả cách chạy nó bằng **Chrome trên
+> máy của khách** qua extension, thay vì Chromium trên VPS. Hai đường dùng chung
+> toàn bộ adapter — khác nhau đúng ở chỗ ai đi lấy trang về.
+
 ---
 
 ## 6. Tiền tệ: giải mã luôn, quy đổi thì KHÔNG tự động
@@ -302,6 +306,8 @@ Form, dùng component sẵn có trong `components/ui/`:
 - Images per product
 - Tiền tệ: tiền tệ nguồn (tự nhận, sửa được) + ô tỉ giá tuỳ chọn (§6)
 - WooCommerce v3 key/secret (tuỳ chọn, chỉ hiện khi platform là woocommerce)
+- **Transport**: `server` (mặc định) hoặc `browser` — đi qua Chrome của khách (§12).
+  Ô `browser` bị khoá và ghi lý do khi chưa có thiết bị nào online.
 
 Bấm Start → tạo job `kind: "crawl"` → chuyển sang `/process/[id]`.
 
@@ -355,6 +361,7 @@ kiểu đó.
 6. Adapter `woocommerce`, `magento`, `generic`.
 7. Đường chậm + Playwright sau cờ `CRAWL_BROWSER`, rồi `etsy`.
 8. Cập nhật `docs/deployment.md`.
+9. Extension + kênh SSE/hàng đợi + ghép đôi thiết bị (§12).
 
 Bước 1–5 đã là một tính năng dùng được (Shopify), trước khi đụng tới trình duyệt.
 
@@ -363,6 +370,10 @@ và nó tự đứng được: crawl Shopify → import, không có Playwright, 
 Bước 6–8 là kế hoạch thứ hai, viết sau khi kế hoạch thứ nhất đã chạy thật — vì
 chính lúc đó mới biết `Product` mapping và log của crawl còn thiếu gì. Một kế
 hoạch gộp cả tám bước sẽ dài tới mức không ai soát nổi.
+
+Bước 9 là **kế hoạch thứ ba**, và nó phụ thuộc vào hai kế hoạch trước theo nghĩa
+chặt: extension chỉ là ống dẫn cho adapter đã có, nên xây nó trước khi có adapter
+là xây một cái ống chưa biết sẽ chở gì.
 
 ---
 
@@ -378,3 +389,187 @@ hoạch gộp cả tám bước sẽ dài tới mức không ai soát nổi.
 - **Pháp lý.** Crawl có thể vi phạm ToS của site đích. App bắt buộc theo
   `robots.txt`, không né CAPTCHA, và ghi log rõ đã crawl site nào — trách nhiệm
   cuối cùng thuộc về người vận hành, và tài liệu bán hàng phải nói thẳng điều đó.
+- **Extension bị Google từ chối hoặc gỡ.** Một extension có tính chất thu thập dữ
+  liệu luôn có rủi ro này, kể cả bản Unlisted. Giảm thiểu: xin quyền theo từng
+  host lúc chạy thay vì `<all_urls>`, và mô tả rõ mục đích. Nếu bị gỡ, đường
+  `transport: server` (§12.10) vẫn chạy nguyên — tính năng chính không chết theo.
+- **Service worker của MV3 bị ngắt giữa một crawl dài.** Rủi ro kỹ thuật lớn nhất
+  của §12, và là thứ **phải đo trước** khi viết tiếp (§12.8).
+- **Confused deputy.** Extension fetch bằng danh tính của khách. Nếu allowlist theo
+  host bị đặt nhầm ở phía server thay vì phía extension (§12.6), một account bị
+  chiếm sẽ đọc được dữ liệu riêng tư của khách. Đây là chỗ dễ làm sai nhất trong
+  toàn bộ tài liệu này.
+
+---
+
+## 12. Kết nối Chrome trên máy của khách
+
+Bổ sung ngày 2026-08-24, sau khi §1–§11 đã được duyệt. Đây là **kế hoạch cài đặt
+thứ ba**, làm sau cùng — không phải vì kém quan trọng, mà vì nó chỉ có nghĩa khi
+adapter và job crawl đã chạy thật.
+
+### 12.1 Ràng buộc không thể đi vòng
+
+Worker chạy trên VPS `easyobot.com`. Chrome của khách chạy trên máy khách, **sau
+NAT**. Server **không có đường nào gọi vào** `localhost:9222` của khách.
+
+Nên mọi thiết kế đều phải là: **máy khách chủ động nối ra**. Không có lựa chọn
+nào khác, và mọi phương án dưới đây chỉ khác nhau ở *cái gì* nối ra.
+
+### 12.2 Extension là ỐNG DẪN, không phải crawler
+
+Chọn: **Chrome extension**, phát hành **Unlisted** trên Chrome Web Store.
+
+Và điều quan trọng nhất của cả mục này: extension **không chứa một dòng logic
+crawl nào**. Nó nhận đúng hai lệnh và không hiểu gì về Shopify hay Etsy.
+
+Lý do là §11: *"nền tảng đổi endpoint"* là rủi ro dễ xảy ra nhất. Nếu adapter nằm
+trong extension thì mỗi lần Shopify đổi `/products.json` là phải build lại, nộp
+lại, **chờ Google duyệt** — trong khi khách đang không crawl được. Adapter nằm ở
+worker thì sửa xong là chạy, không ai phải cài lại gì.
+
+Hệ quả kèm theo: extension nhỏ, ít quyền, dễ duyệt, và gần như không bao giờ cần
+cập nhật.
+
+### 12.3 Kênh truyền: SSE + POST, KHÔNG WebSocket
+
+Next.js route handler không nhận WebSocket upgrade, và dựng thêm một process thứ
+ba chỉ để giữ WebSocket là thêm một thứ nữa để triển khai sai. Repo này đã có sẵn
+**đúng khuôn mẫu cần dùng**: SSE ở `app/api/jobs/stream/route.ts:108` và
+`app/api/jobs/[id]/logs/stream/route.ts:158`.
+
+- Extension mở `GET /api/crawl/agent/stream` (SSE) → **nhận lệnh**.
+- Extension `POST /api/crawl/agent/result` → **trả kết quả**.
+
+Hai chiều, hai request, không cần WebSocket.
+
+#### 12.3.1 Nối web process với worker: hàng đợi, KHÔNG pub/sub
+
+Chỗ này phải nói kỹ, vì làm sai là hỏng âm thầm.
+
+`lib/redis.ts:33` phát biểu nguyên tắc của repo: *"Losing a published message
+costs responsiveness, never correctness"* — pub/sub ở đây **chỉ là tiếng gõ cửa**,
+dữ liệu thật luôn nằm ở Postgres. `STOP_CHANNEL` và `LOG_CHANNEL` đều chỉ chở một
+run id.
+
+**Lệnh fetch gửi cho extension thì ngược lại: nó CHÍNH LÀ dữ liệu.** Mất một lệnh
+là crawl treo giữa chừng. Nên tuyệt đối không dùng `publish()` cho việc này.
+
+Dùng list của Redis — Redis đã là hàng đợi thật ở repo này rồi, vì BullMQ:
+
+```
+worker:     LPUSH  crawl:dev:<deviceId>:cmd        {id, kind, url, ...}
+            BRPOP  crawl:cmd:<cmdId>:res  <deadline>
+web (SSE):  BRPOP  crawl:dev:<deviceId>:cmd        → đẩy xuống extension
+web (POST): LPUSH  crawl:cmd:<cmdId>:res           {status, body, ...}
+```
+
+Mọi key đều có TTL. Worker chờ có hạn; quá hạn thì coi như thiết bị mất kết nối,
+ghi warning và **dừng run với thông báo rõ**, không im lặng bỏ qua sản phẩm.
+
+### 12.4 Giao thức: đúng hai lệnh
+
+| Lệnh | Extension làm gì | Trả về |
+|---|---|---|
+| `fetch` | `fetch(url)` ngay trong extension, kèm cookie của khách nếu host được phép | `{status, headers, body}` |
+| `render` | Mở tab ẩn, chờ tải xong, cuộn để ảnh lazy load, đọc DOM, đóng tab | `{status, finalUrl, html}` |
+
+`fetch` đủ cho Shopify, Woo, Magento — vốn trả JSON. `render` dành cho trang dựng
+bằng JS, tức là Etsy và các shop có theme render phía client.
+
+Cả hai đều có **trần dung lượng** (mặc định 8 MB) và **trần thời gian** (30 giây).
+Vượt trần thì trả lỗi, không trả một phần.
+
+### 12.5 Ghép đôi thiết bị
+
+Không bắt khách dán license key vào extension. Thay vào đó:
+
+1. Khách đăng nhập web, vào `/crawl`, bấm **"Connect my Chrome"** → hiện mã 6 số,
+   sống 5 phút (lưu ở Redis, có TTL).
+2. Bấm vào extension, gõ mã.
+3. Server phát một **device token** dài hạn, chỉ trả về đúng một lần.
+
+Bảng mới `crawl_devices`: `id`, `ownerId`, `label`, `platform` (`macos` |
+`windows`), `tokenHash`, `createdAt`, `lastSeenAt`, `revokedAt`.
+
+Ở `/settings` có bảng danh sách thiết bị đã nối, kèm lần cuối online và nút
+**Revoke**. Token lưu dạng hash, không lưu bản rõ — cùng cách repo đang làm với
+các bí mật khác.
+
+Thiết bị thuộc **account**, nên nó đi theo đúng cơ chế cô lập per-account đang có.
+
+### 12.6 An toàn: extension là một "confused deputy"
+
+Đây là rủi ro nghiêm trọng nhất của cả tính năng, phải nói thẳng.
+
+Extension fetch **bằng danh tính của khách**. Nếu nó nhận lệnh từ server một cách
+vô điều kiện, thì bất kỳ ai chiếm được account — hoặc chính server nếu bị xâm nhập
+— đều có thể ra lệnh `fetch https://mail.google.com` và **đọc hộp thư của khách**.
+
+Ba lớp chặn, và lớp quan trọng nhất nằm ở phía extension chứ không phải server:
+
+1. **Allowlist theo host, do EXTENSION tự giữ.** Trước khi crawl chạy, extension
+   hiện ra danh sách host sẽ truy cập (host của shop + CDN của nó) và **khách bấm
+   đồng ý**. Sau đó extension **từ chối mọi lệnh có host ngoài danh sách đó**.
+   Server không có quyền mở rộng danh sách này giữa chừng. Đây là lớp duy nhất còn
+   đứng vững khi server bị xâm nhập, nên nó phải nằm ở extension.
+2. **Quyền xin theo từng host lúc chạy** (`chrome.permissions.request`), không
+   xin `<all_urls>` trong manifest. Vừa đúng tinh thần bản Unlisted, vừa làm bản
+   duyệt của Google nhẹ đi.
+3. **Chặn địa chỉ nội bộ.** `blockedReason()` trong `lib/outbound-url.ts:59`
+   **chạy được trong trình duyệt** — chính file đó mở đầu bằng *"Do NOT import
+   `server-only` here"*. Nên extension import lại đúng hàm đó, không viết bản thứ
+   hai. Không có nó, extension trở thành công cụ quét mạng LAN của chính khách.
+
+`assertFetchableUrl()` (§7.1) vẫn chạy ở worker như cũ. Hai hàm, hai môi trường,
+một luật — đúng như file đó được viết ra để làm.
+
+### 12.7 Những gì tính năng này KHÔNG làm
+
+Dùng Chrome thật của khách khiến ít gặp CAPTCHA hơn. Đó là **hệ quả**, không phải
+mục tiêu, và ranh giới không đổi so với §7.2 và §7.3:
+
+- **robots.txt vẫn từ chối cứng**, kiểm tra ở server trước khi phát bất kỳ lệnh nào.
+- **CAPTCHA vẫn dừng sạch.** Gặp trang chặn thì báo và dừng.
+- **Không có bất kỳ tính năng chống phát hiện nào**: không stealth plugin, không
+  giả fingerprint, không xoay user-agent, không giải CAPTCHA.
+
+Nếu về sau có ai đề nghị thêm những thứ đó, đây là chỗ đã ghi sẵn câu trả lời:
+không.
+
+### 12.8 Rủi ro thật của MV3: service worker bị ngắt
+
+Chrome ngắt service worker của extension khi rảnh. Một stream SSE đang mở **có**
+kéo dài tuổi thọ của nó ở các bản Chrome gần đây, nhưng **phải đo, không được tin
+sẵn** — đây đúng là loại giả định mà repo này quen ghi *"Verified, not assumed"*.
+
+Giảm thiểu, theo thứ tự:
+
+- `chrome.alarms` mỗi 30 giây để đánh thức lại.
+- Extension **tự nối lại** với backoff khi stream đứt.
+- Worker coi việc mất thiết bị là chuyện bình thường: lệnh quá hạn thì thử lại một
+  lần, vẫn hỏng thì dừng run **có báo**.
+- Popup của extension hiện trạng thái kết nối, để khách nhìn thấy khi nó rớt.
+
+**Việc phải đo trước khi build tiếp**: một crawl 20 phút có giữ được service worker
+sống không. Nếu không, phương án dự phòng là extension mở một **offscreen document**
+— thứ có vòng đời dài hơn hẳn service worker.
+
+### 12.9 macOS và Windows
+
+Extension giống hệt nhau trên hai hệ điều hành: cùng một bản build, cùng một cách
+cài, không ký số, không notarize, không cần terminal. Đây chính là lý do phương án
+này thắng bridge agent — agent đóng gói sẽ cần notarize của Apple (tài khoản
+99$/năm) và nên ký trên Windows, lặp lại mỗi lần phát hành.
+
+`platform` trong `crawl_devices` chỉ để hiển thị và hỗ trợ, không rẽ nhánh logic.
+
+### 12.10 Chọn đường đi ở form crawl
+
+Job crawl thêm một tuỳ chọn `transport`:
+
+- `server` — worker tự fetch từ VPS. Mặc định, nhanh nhất, không cần cài gì.
+- `browser` — đi qua Chrome của khách.
+
+Chọn `browser` mà không có thiết bị nào đang online thì **fail ngay lúc tạo run**,
+kèm hướng dẫn nối máy, chứ không xếp hàng rồi treo.
