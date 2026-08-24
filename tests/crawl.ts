@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { CrawlMoneyError, convert, fromMinorUnits } from "../lib/sources/crawl/money";
+import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 
 let passed = 0;
 let failed = 0;
@@ -72,8 +73,45 @@ function moneyTests(): void {
   refuses("a zero rate", () => convert("10.00", 0), /rate/i);
 }
 
+function robotsTests(): void {
+  console.log("\nrobots.txt");
+
+  const rules = parseRobots(fixture("robots.txt"), CRAWLER_USER_AGENT);
+
+  check("a plain path is allowed", rules.isAllowed("/collections/all"));
+  check("the root is allowed", rules.isAllowed("/"));
+  check("a disallowed prefix is refused", !rules.isAllowed("/admin/settings"));
+  check("an exact disallow is refused", !rules.isAllowed("/cart"));
+  check("a disallowed directory is refused", !rules.isAllowed("/products/shoe"));
+
+  /*
+   * The rule that makes this worth writing rather than string-matching: the
+   * LONGEST match wins, and Allow beats Disallow at equal length. A crawler that
+   * simply scanned for a Disallow prefix would refuse this path.
+   */
+  check("a longer Allow beats a shorter Disallow", rules.isAllowed("/products/allowed-anyway"));
+
+  check("crawl delay is read", rules.crawlDelayMs === 2000, String(rules.crawlDelayMs));
+
+  // The group for another agent must not leak into ours.
+  check("another agent's group is ignored", rules.isAllowed("/anything"));
+
+  // An empty Disallow means "nothing is disallowed", not "everything is".
+  const permissive = parseRobots("User-agent: *\nDisallow:", CRAWLER_USER_AGENT);
+  check("an empty Disallow allows everything", permissive.isAllowed("/admin"));
+
+  // No robots.txt at all, or an unreadable one, must not become a silent block.
+  const empty = parseRobots("", CRAWLER_USER_AGENT);
+  check("an empty file allows everything", empty.isAllowed("/products/x"));
+  check("an empty file has no delay", empty.crawlDelayMs === null);
+
+  const blocked = parseRobots("User-agent: *\nDisallow: /", CRAWLER_USER_AGENT);
+  check("a site-wide block is honoured", !blocked.isAllowed("/products/x"));
+}
+
 async function main(): Promise<void> {
   moneyTests();
+  robotsTests();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {

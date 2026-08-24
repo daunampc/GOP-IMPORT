@@ -1,0 +1,9 @@
+User-agent: BadBot
+Disallow: /
+
+User-agent: *
+Crawl-delay: 2
+Disallow: /admin
+Disallow: /cart
+Allow: /products/allowed-anyway
+Disallow: /products/
