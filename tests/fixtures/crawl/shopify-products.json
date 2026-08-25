@@ -1,0 +1,74 @@
+{
+  "products": [
+    {
+      "id": 1001,
+      "title": "Enamel Mug",
+      "handle": "enamel-mug",
+      "body_html": "<p>Holds coffee.</p>",
+      "vendor": "Northbound",
+      "product_type": "Drinkware",
+      "tags": ["kitchen", "gift"],
+      "options": [{ "name": "Title", "values": ["Default Title"] }],
+      "variants": [
+        {
+          "id": 5001,
+          "title": "Default Title",
+          "sku": "MUG-01",
+          "price": "18.00",
+          "compare_at_price": null,
+          "available": true,
+          "option1": "Default Title",
+          "option2": null,
+          "option3": null,
+          "featured_image": null
+        }
+      ],
+      "images": [
+        { "id": 9001, "src": "https://cdn.shopify.com/s/files/1/mug_400x.jpg", "position": 1 },
+        { "id": 9002, "src": "https://cdn.shopify.com/s/files/1/mug-side_grande.jpg", "position": 2 }
+      ]
+    },
+    {
+      "id": 1002,
+      "title": "Camp Shirt",
+      "handle": "camp-shirt",
+      "body_html": "<p>Linen.</p>",
+      "vendor": "Northbound",
+      "product_type": "Shirts",
+      "tags": [],
+      "options": [
+        { "name": "Size", "values": ["S", "M"] },
+        { "name": "Colour", "values": ["Sand"] }
+      ],
+      "variants": [
+        {
+          "id": 5002,
+          "title": "S / Sand",
+          "sku": "SHIRT-S",
+          "price": "64.00",
+          "compare_at_price": "80.00",
+          "available": true,
+          "option1": "S",
+          "option2": "Sand",
+          "option3": null,
+          "featured_image": { "src": "https://cdn.shopify.com/s/files/1/shirt-s_1024x1024.jpg" }
+        },
+        {
+          "id": 5003,
+          "title": "M / Sand",
+          "sku": "SHIRT-M",
+          "price": "64.00",
+          "compare_at_price": null,
+          "available": false,
+          "option1": "M",
+          "option2": "Sand",
+          "option3": null,
+          "featured_image": null
+        }
+      ],
+      "images": [
+        { "id": 9003, "src": "https://cdn.shopify.com/s/files/1/shirt_2048x2048.jpg", "position": 1 }
+      ]
+    }
+  ]
+}

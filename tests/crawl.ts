@@ -17,6 +17,7 @@ import { join } from "node:path";
 
 import { CrawlMoneyError, convert, fromMinorUnits } from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
+import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
 
 let passed = 0;
 let failed = 0;
@@ -132,9 +133,79 @@ function robotsTests(): void {
   check("a . in a rule still matches itself", !dotted.isAllowed("/a.b"));
 }
 
+function shopifyTests(): void {
+  console.log("\nShopify mapping");
+
+  const payload = JSON.parse(fixture("shopify-products.json")) as { products: ShopifyProduct[] };
+  const opts = { imagesPerProduct: 10, minorUnit: 2, fxRate: null };
+
+  const mug = toProduct(payload.products[0], opts);
+  const shirt = toProduct(payload.products[1], opts);
+
+  check("name", mug.name === "Enamel Mug", mug.name);
+  check("slug from the handle", mug.slug === "enamel-mug", String(mug.slug));
+  check("description", mug.description === "<p>Holds coffee.</p>", String(mug.description));
+  check("sku from the only variant", mug.sku === "MUG-01", String(mug.sku));
+  check("price", mug.regular_price === "18.00", String(mug.regular_price));
+  check("no sale price when compare_at is null", mug.sale_price === undefined);
+  check("in stock", mug.instock === true);
+  check("category from product_type", JSON.stringify(mug.categories) === '["Drinkware"]');
+  check("tags", JSON.stringify(mug.tags) === '["kitchen","gift"]');
+  check("vendor kept as meta", mug.custom_meta?.brand === "Northbound", JSON.stringify(mug.custom_meta));
+
+  /*
+   * The Shopify quirk that decides simple vs variable. A one-variant product
+   * whose only option is the literal placeholder `Title: Default Title` is a
+   * SIMPLE product — Shopify has no "no options" state, so it invents one.
+   * Reading that as a variable product would publish a variation named
+   * "Default Title" into the customer's shop.
+   */
+  check("placeholder options mean simple", mug.type === "simple", String(mug.type));
+  check("simple has no variations", (mug.variations ?? []).length === 0);
+  check("simple has no attributes", (mug.attributes ?? []).length === 0);
+
+  check("real options mean variable", shirt.type === "variable", String(shirt.type));
+  check("two attributes", (shirt.attributes ?? []).length === 2);
+  check("attribute name", shirt.attributes?.[0].name === "Size", JSON.stringify(shirt.attributes));
+  check(
+    "attribute values",
+    JSON.stringify(shirt.attributes?.[0].values) === '["S","M"]',
+    JSON.stringify(shirt.attributes?.[0].values),
+  );
+  check("attributes drive variations", shirt.attributes?.[0].used_for_variation === true);
+  check("two variations", (shirt.variations ?? []).length === 2);
+  check("variation sku", shirt.variations?.[0].sku === "SHIRT-S", String(shirt.variations?.[0].sku));
+  check(
+    "variation attributes",
+    JSON.stringify(shirt.variations?.[0].attributes) ===
+      '[{"name":"Size","value":"S"},{"name":"Colour","value":"Sand"}]',
+    JSON.stringify(shirt.variations?.[0].attributes),
+  );
+  check("sale price from compare_at", shirt.variations?.[0].sale_price === "64.00");
+  check("regular price from compare_at", shirt.variations?.[0].regular_price === "80.00");
+  check("sold-out variation", shirt.variations?.[1].instock === false);
+
+  // Shopify's CDN suffixes are a thumbnail request, not part of the filename.
+  check("strips _400x", fullSizeImage("https://cdn.shopify.com/a/mug_400x.jpg") === "https://cdn.shopify.com/a/mug.jpg");
+  check("strips _grande", fullSizeImage("https://cdn.shopify.com/a/m_grande.jpg") === "https://cdn.shopify.com/a/m.jpg");
+  check("strips _1024x1024", fullSizeImage("https://cdn.shopify.com/a/s_1024x1024.jpg") === "https://cdn.shopify.com/a/s.jpg");
+  check("keeps a query string", fullSizeImage("https://cdn.shopify.com/a/m_400x.jpg?v=2") === "https://cdn.shopify.com/a/m.jpg?v=2");
+  check("leaves an unsuffixed url alone", fullSizeImage("https://cdn.shopify.com/a/m.jpg") === "https://cdn.shopify.com/a/m.jpg");
+  check("images are full size and ordered", JSON.stringify(mug.images) ===
+    '["https://cdn.shopify.com/s/files/1/mug.jpg","https://cdn.shopify.com/s/files/1/mug-side.jpg"]',
+    JSON.stringify(mug.images));
+
+  const capped = toProduct(payload.products[0], { ...opts, imagesPerProduct: 1 });
+  check("image cap applies", (capped.images ?? []).length === 1);
+
+  const converted = toProduct(payload.products[0], { ...opts, fxRate: 25400 });
+  check("fx applies to the price", converted.regular_price === "457200.00", String(converted.regular_price));
+}
+
 async function main(): Promise<void> {
   moneyTests();
   robotsTests();
+  shopifyTests();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {
