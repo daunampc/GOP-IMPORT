@@ -27,7 +27,7 @@ export function CrawlForm() {
   const router = useRouter();
 
   const [shopUrl, setShopUrl] = useState("");
-  const [platform, setPlatform] = useState<(typeof CRAWL_PLATFORMS)[number]>(
+  const [platform, setPlatform] = useState<(typeof CRAWL_PLATFORMS)[number] | "auto">(
     DEFAULT_CRAWL_OPTIONS.platform,
   );
   const [limit, setLimit] = useState(DEFAULT_CRAWL_OPTIONS.limit);
@@ -103,7 +103,7 @@ export function CrawlForm() {
               />
             </Field>
 
-            <Field label="Platform" hint="Only Shopify is readable in this build.">
+            <Field label="Platform" hint="Detection reads the home page once to work out what a shop runs.">
               {/*
                * No `label` here: `Field` already renders the visible "Platform"
                * label, and `Segmented` turns its own `label` prop into an
@@ -113,15 +113,17 @@ export function CrawlForm() {
               <Segmented
                 value={platform}
                 onChange={setPlatform}
-                options={CRAWL_PLATFORMS.map((name) => ({
-                  value: name,
-                  label: CRAWL_PLATFORM_LABELS[name],
-                  disabled: name !== "shopify",
-                  // With a single adapter, an "auto" detector could only ever
-                  // answer "shopify" — an automatic answer that is really a
-                  // constant is worse than a question. See lib/crawl-options.ts.
-                  hint: name === "shopify" ? undefined : "Not in this build yet",
-                }))}
+                options={[
+                  { value: "auto" as const, label: "Detect automatically" },
+                  // Etsy needs the browser crawler (plan 3), so it stays
+                  // disabled here even though the other named platforms are live.
+                  ...CRAWL_PLATFORMS.map((name) => ({
+                    value: name,
+                    label: CRAWL_PLATFORM_LABELS[name],
+                    disabled: name === "etsy",
+                    hint: name === "etsy" ? "Needs the browser crawler" : undefined,
+                  })),
+                ]}
               />
             </Field>
 

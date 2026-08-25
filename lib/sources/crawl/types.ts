@@ -18,6 +18,8 @@ export interface CrawlResponse {
   status: number;
   contentType: string;
   body: string;
+  /** Lower-cased header names, so an adapter can score on `x-shopify-stage`. */
+  headers: Record<string, string>;
 }
 
 /**

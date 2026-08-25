@@ -31,11 +31,12 @@ export const CRAWL_TRANSPORTS = ["server", "browser"] as const;
 export const crawlOptionsSchema = z.object({
   shopUrl: z.string().trim().url("That is not a web address."),
 
-  /*
-   * No "auto" yet. With one adapter, a detector could only answer "shopify", and
-   * an automatic answer that is really a constant is worse than a question.
+  /**
+   * `auto` reads the home page and scores every adapter against it. Named
+   * platforms skip that request entirely, which is why the form still offers
+   * them: an operator who knows what the shop runs should not pay for a guess.
    */
-  platform: z.enum(CRAWL_PLATFORMS).default("shopify"),
+  platform: z.enum([...CRAWL_PLATFORMS, "auto"]).default("auto"),
 
   transport: z.enum(CRAWL_TRANSPORTS).default("server"),
 
@@ -70,7 +71,7 @@ export const crawlOptionsSchema = z.object({
 export type CrawlOptions = z.infer<typeof crawlOptionsSchema>;
 
 export const DEFAULT_CRAWL_OPTIONS: Omit<CrawlOptions, "shopUrl"> = {
-  platform: "shopify",
+  platform: "auto",
   transport: "server",
   limit: 500,
   imagesPerProduct: 10,

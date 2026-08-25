@@ -591,7 +591,7 @@ async function orchestratorTests(): Promise<void> {
           const path = new URL(url).pathname;
 
           if (path === "/robots.txt") {
-            return { status: 200, contentType: "text/plain", body: robots };
+            return { status: 200, contentType: "text/plain", body: robots, headers: {} };
           }
           if (path === "/products.json") {
             const page = new URL(url).searchParams.get("page");
@@ -599,9 +599,15 @@ async function orchestratorTests(): Promise<void> {
               status: 200,
               contentType: "application/json",
               body: page === "1" ? fixture("shopify-products.json") : '{"products":[]}',
+              headers: {},
             };
           }
-          return { status: 200, contentType: "text/html", body: "<html>cdn.shopify.com</html>" };
+          return {
+            status: 200,
+            contentType: "text/html",
+            body: "<html>cdn.shopify.com</html>",
+            headers: {},
+          };
         },
         // Present so `crawlShop`'s `"raiseDelayTo" in transport` check finds it,
         // and recording rather than acting on it so the delay-cap test below can
@@ -746,6 +752,75 @@ async function orchestratorTests(): Promise<void> {
     huge.raisedTo.length === 1 && huge.raisedTo[0] === MAX_CRAWL_DELAY_MS,
     `raiseDelayTo was called with: ${JSON.stringify(huge.raisedTo)}`,
   );
+
+  /*
+   * Detection reads the homepage ONCE and scores every adapter against it. It
+   * has to fetch, so it happens after robots.txt like everything else.
+   */
+  function homepageTransport(html: string, headers: Record<string, string> = {}) {
+    const asked: string[] = [];
+
+    return {
+      asked,
+      transport: {
+        async fetchText(url: string) {
+          asked.push(url);
+          const path = new URL(url).pathname;
+
+          if (path === "/robots.txt") {
+            return { status: 200, contentType: "text/plain", body: "", headers: {} };
+          }
+          if (path === "/") {
+            return { status: 200, contentType: "text/html", body: html, headers };
+          }
+          if (path === "/products.json") {
+            const page = new URL(url).searchParams.get("page");
+            return {
+              status: 200,
+              contentType: "application/json",
+              body: page === "1" ? fixture("shopify-products.json") : '{"products":[]}',
+              headers: {},
+            };
+          }
+          return { status: 404, contentType: "text/plain", body: "", headers: {} };
+        },
+      },
+    };
+  }
+
+  const auto = homepageTransport('<html><script src="https://cdn.shopify.com/x.js"></script></html>');
+  const detected = await crawlShop({
+    shopUrl: "https://example.test",
+    platform: "auto",
+    limit: 10,
+    imagesPerProduct: 5,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: auto.transport,
+  });
+  check("auto detected shopify", detected.platform === "shopify", detected.platform);
+  check("the homepage was read once", auto.asked.filter((u) => u.endsWith("/")).length === 1);
+
+  // Nothing recognisable falls back to the generic adapter rather than refusing.
+  const unknown = homepageTransport("<html><body>a shop</body></html>");
+  await refusesAsync(
+    "an unrecognised site falls back to generic and needs a sitemap",
+    () =>
+      crawlShop({
+        shopUrl: "https://example.test",
+        platform: "auto",
+        limit: 10,
+        imagesPerProduct: 5,
+        minorUnit: 2,
+        fxRate: null,
+        signal: new AbortController().signal,
+        log: () => {},
+        transport: unknown.transport,
+      }),
+    /sitemap/i,
+  );
 }
 
 async function wooOrchestratorTests(): Promise<void> {
@@ -775,18 +850,24 @@ async function wooOrchestratorTests(): Promise<void> {
           const parsed = new URL(url);
 
           if (parsed.pathname === "/robots.txt") {
-            return { status: 200, contentType: "text/plain", body: "" };
+            return { status: 200, contentType: "text/plain", body: "", headers: {} };
           }
 
           if (parsed.pathname === "/wp-json/wc/store/v1/products") {
             if (script.productsStatus !== undefined) {
-              return { status: script.productsStatus, contentType: "application/json", body: "" };
+              return {
+                status: script.productsStatus,
+                contentType: "application/json",
+                body: "",
+                headers: {},
+              };
             }
             const page = Number(parsed.searchParams.get("page") ?? "1");
             return {
               status: 200,
               contentType: "application/json",
               body: JSON.stringify(pages[page - 1] ?? []),
+              headers: {},
             };
           }
 
@@ -799,16 +880,22 @@ async function wooOrchestratorTests(): Promise<void> {
                 status: override.status,
                 contentType: "application/json",
                 body: override.body ?? "",
+                headers: {},
               };
             }
             const known = knownVariations[id];
             if (known !== undefined) {
-              return { status: 200, contentType: "application/json", body: JSON.stringify(known) };
+              return {
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify(known),
+                headers: {},
+              };
             }
-            return { status: 404, contentType: "application/json", body: "" };
+            return { status: 404, contentType: "application/json", body: "", headers: {} };
           }
 
-          return { status: 404, contentType: "text/plain", body: "not found" };
+          return { status: 404, contentType: "text/plain", body: "not found", headers: {} };
         },
       },
     };
