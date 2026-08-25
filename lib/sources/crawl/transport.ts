@@ -193,6 +193,7 @@ export function serverTransport(options: ServerTransportOptions): ServerTranspor
           status: response.status,
           contentType: response.headers.get("content-type") ?? "",
           body: "",
+          headers: Object.fromEntries(response.headers),
         };
       }
 
@@ -201,6 +202,7 @@ export function serverTransport(options: ServerTransportOptions): ServerTranspor
           status: response.status,
           contentType: response.headers.get("content-type") ?? "",
           body: await readBounded(response, target),
+          headers: Object.fromEntries(response.headers),
         };
       }
 

@@ -10,6 +10,9 @@
 
 import type { Product } from "../../gop-client";
 import { shopifyAdapter } from "./adapters/shopify";
+import { wooAdapter } from "./adapters/woocommerce";
+import { magentoAdapter } from "./adapters/magento";
+import { genericAdapter } from "./adapters/generic";
 import { CRAWLER_USER_AGENT, parseRobots } from "./robots";
 import { serverTransport, type ServerTransport } from "./transport";
 import {
@@ -17,17 +20,20 @@ import {
   type CrawlAdapter,
   type CrawlLogLine,
   type CrawlTransport,
+  type DetectInput,
   type PlatformName,
 } from "./types";
 
 /**
- * Only Shopify, on purpose.
- *
- * The other four adapters are plan 2. An `auto` detection that can only ever
- * answer "shopify" would be a lie told by a lookup table, so `pickAdapter`
- * refuses a store it cannot serve rather than guessing.
+ * Every adapter this build can read. `etsy` is in `PlatformName` but not here:
+ * it needs the browser crawler, which is plan 3.
  */
-const ADAPTERS: ReadonlyArray<CrawlAdapter> = [shopifyAdapter];
+const ADAPTERS: ReadonlyArray<CrawlAdapter> = [
+  shopifyAdapter,
+  wooAdapter,
+  magentoAdapter,
+  genericAdapter,
+];
 
 /** How long to leave between two requests to the same host, unless robots says more. */
 const DEFAULT_DELAY_MS = 300;
@@ -126,13 +132,6 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
       );
     }
 
-    if (!rules.isAllowed("/products.json")) {
-      throw new CrawlError(
-        `${shopUrl.host} asks crawlers not to read its product list in robots.txt, so this run was ` +
-          "refused. There is no way to override that here.",
-      );
-    }
-
     /*
      * One transport for the whole crawl, and its floor is raised rather than a
      * second one being built.
@@ -141,6 +140,14 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
      * products would start a fresh per-host clock and let the first product
      * request follow robots.txt instantly — the one gap the delay is least
      * entitled to skip, since it is the gap the site just told us about.
+     *
+     * Raised HERE, before an adapter is even chosen — not after. Detection
+     * fetches `/` for a `platform: "auto"` run, and that fetch is itself a
+     * request to this host, made right after robots.txt. Raising the floor
+     * after adapter selection would let that request go out at the default
+     * floor instead of the site's declared `Crawl-delay`, reopening on the
+     * detection fetch the exact gap this raise exists to close on the first
+     * product request.
      */
     if (rules.crawlDelayMs !== null && "raiseDelayTo" in transport) {
       const cappedDelayMs = Math.min(MAX_CRAWL_DELAY_MS, rules.crawlDelayMs);
@@ -159,7 +166,30 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
       (transport as ServerTransport).raiseDelayTo(cappedDelayMs);
     }
 
-    const adapter = pickAdapter(input.platform);
+    // Detection fetches `/`, so it faces the same robots.txt check as every
+    // other request this crawler makes — a site that disallows its own home
+    // page cannot be auto-detected, and the operator is told to choose by hand.
+    if (input.platform === "auto" && !rules.isAllowed("/")) {
+      throw new CrawlError(
+        `${shopUrl.host} disallows its own home page in robots.txt, so this crawler cannot work ` +
+          "out what it is. Choose the platform by hand.",
+      );
+    }
+
+    const adapter =
+      input.platform === "auto"
+        ? await detectPlatform(shopUrl, transport, input.log)
+        : adapterNamed(input.platform);
+
+    for (const path of adapter.robotsPaths) {
+      if (!rules.isAllowed(path)) {
+        throw new CrawlError(
+          `${shopUrl.host} asks crawlers not to fetch \`${path}\` in its robots.txt, and that is ` +
+            `where a ${adapter.name} crawl has to start. This run was refused, and there is no way ` +
+            "to override that here.",
+        );
+      }
+    }
 
     input.log({
       level: "info",
@@ -178,6 +208,7 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
       fxRate: input.fxRate,
       log: input.log,
       signal,
+      isAllowed: (pathname: string) => rules.isAllowed(pathname),
     })) {
       products.push(product);
     }
@@ -203,23 +234,72 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
   }
 }
 
-function pickAdapter(platform: PlatformName | "auto"): CrawlAdapter {
-  if (platform === "auto") {
-    /*
-     * Detection needs the homepage, and with one adapter in the list it could
-     * only ever answer "shopify". Rather than dress that up as a decision, this
-     * build asks. Plan 2 replaces this with a real scored detect().
-     */
-    throw new CrawlError(
-      "Automatic platform detection arrives with the other adapters. Choose Shopify for now.",
-    );
+/** Below this, a score is a coincidence rather than a recognition. */
+const DETECT_THRESHOLD = 0.5;
+
+/**
+ * Which platform is this?
+ *
+ * One request for the homepage, scored by every adapter, highest wins. Scored
+ * rather than decided by a single signal because every individual signal lies
+ * somewhere: a Shopify theme can be served from a custom domain with no
+ * `myshopify.com` in sight, and plenty of sites mention `wp-content` while
+ * running no shop at all.
+ *
+ * Nothing recognisable falls back to `generic`, which reads a sitemap and
+ * schema.org — that is what it is for, and refusing outright would turn every
+ * unfamiliar shop into a dead end.
+ */
+async function detectPlatform(
+  shopUrl: URL,
+  transport: CrawlTransport,
+  log: (line: CrawlLogLine) => void,
+): Promise<CrawlAdapter> {
+  const response = await transport.fetchText(shopUrl.toString());
+
+  const input: DetectInput = {
+    url: shopUrl,
+    headers: response.headers,
+    html: response.status === 200 ? response.body : "",
+  };
+
+  const scored = ADAPTERS.map((adapter) => ({ adapter, score: adapter.detect(input) })).sort(
+    (a, b) => b.score - a.score,
+  );
+
+  const best = scored[0];
+
+  log({
+    level: "info",
+    message:
+      best.score >= DETECT_THRESHOLD
+        ? `Detected ${best.adapter.name} (score ${best.score.toFixed(2)}).`
+        : "Nothing recognised this shop, so it will be read as a generic schema.org site.",
+    detail: Object.fromEntries(scored.map((entry) => [entry.adapter.name, entry.score])),
+  });
+
+  if (best.score < DETECT_THRESHOLD) {
+    const generic = ADAPTERS.find((adapter) => adapter.name === "generic");
+    // Unreachable today — `ADAPTERS` above statically includes `genericAdapter`.
+    // Kept as a guard against a future edit to `ADAPTERS` that drops it (or
+    // renames it) without updating this fallback, which would otherwise fail
+    // with a `find` returning `undefined` deep inside `.name` access instead of
+    // a message that says what actually went wrong.
+    if (generic === undefined) {
+      throw new CrawlError("No adapter could read this shop.");
+    }
+    return generic;
   }
 
+  return best.adapter;
+}
+
+function adapterNamed(platform: PlatformName): CrawlAdapter {
   const adapter = ADAPTERS.find((candidate) => candidate.name === platform);
 
   if (adapter === undefined) {
     throw new CrawlError(
-      `This build can only read Shopify stores. ${platform} support is not in it yet.`,
+      `${platform} support is not in this build yet. Etsy needs the browser crawler.`,
     );
   }
 

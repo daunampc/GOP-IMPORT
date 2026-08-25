@@ -15,11 +15,27 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { CrawlMoneyError, convert, fromDecimal, fromMinorUnits } from "../lib/sources/crawl/money";
+import {
+  CrawlMoneyError,
+  convert,
+  fromDecimal,
+  fromMinorUnits,
+  lessThan,
+} from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
+import {
+  toProduct as wooToProduct,
+  type WooProduct,
+  type WooVariation,
+} from "../lib/sources/crawl/adapters/woocommerce";
+import { toProduct as magentoToProduct, type MagentoItem } from "../lib/sources/crawl/adapters/magento";
+import { jsonLdBlocks, metaContent, sitemapUrls } from "../lib/sources/crawl/html";
+import { discover, productFromJsonLd, productFromMeta } from "../lib/sources/crawl/adapters/generic";
 import { serverTransport, sleep } from "../lib/sources/crawl/transport";
 import { crawlShop, MAX_CRAWL_DELAY_MS } from "../lib/sources/crawl";
+import { crawlOptionsSchema, minorUnitFor as reExportedMinorUnitFor } from "../lib/crawl-options";
+import type { CrawlContext } from "../lib/sources/crawl/types";
 
 let passed = 0;
 let failed = 0;
@@ -138,6 +154,10 @@ function moneyTests(): void {
 
   // Round trip, since the two functions have to agree.
   check("round trip", fromMinorUnits(fromDecimal("64.00", 2), 2) === "64.00");
+
+  check("lessThan, ordinary comparison", lessThan("49.00", "59.00", 2) === true);
+  // A sale price equal to the regular price is not a sale.
+  check("lessThan, equal values is false", lessThan("59.00", "59.00", 2) === false);
 }
 
 function robotsTests(): void {
@@ -266,6 +286,97 @@ function shopifyTests(): void {
 
   const converted = toProduct(payload.products[0], { ...opts, fxRate: 25400 });
   check("fx applies to the price", converted.regular_price === "457200.00", String(converted.regular_price));
+}
+
+function wooTests(): void {
+  console.log("\nWooCommerce mapping");
+
+  const products = JSON.parse(fixture("woo-store-api.json")) as WooProduct[];
+  const variation = JSON.parse(fixture("woo-variation.json")) as WooVariation;
+  const opts = { imagesPerProduct: 10, fxRate: null };
+
+  const tote = wooToProduct(products[0], [], opts);
+
+  check("name", tote.name === "Cotton Tote", tote.name);
+  check("slug", tote.slug === "cotton-tote", String(tote.slug));
+  check("sku", tote.sku === "TOTE-01", String(tote.sku));
+  check("description", tote.description === "<p>Roomy.</p>", String(tote.description));
+  check("short description", tote.short_description === "<p>Roomy tote.</p>");
+
+  /*
+   * The Store API states its OWN exponent per product. Reading the crawl's
+   * configured currency instead would price a VND shop as if it were USD.
+   */
+  check("price from minor units", tote.regular_price === "14.50", String(tote.regular_price));
+  check("no sale when sale equals regular", tote.sale_price === undefined);
+  check("in stock", tote.instock === true);
+  check("category name only", JSON.stringify(tote.categories) === '["Bags"]');
+  check("tag name only", JSON.stringify(tote.tags) === '["cotton"]');
+  check("simple", tote.type === "simple", String(tote.type));
+
+  const shirt = wooToProduct(products[1], [variation], opts);
+
+  check("variable", shirt.type === "variable", String(shirt.type));
+  check("attribute name", shirt.attributes?.[0].name === "Size", JSON.stringify(shirt.attributes));
+  check(
+    "attribute values from terms",
+    JSON.stringify(shirt.attributes?.[0].values) === '["S","M"]',
+    JSON.stringify(shirt.attributes?.[0].values),
+  );
+  check("attribute drives variation", shirt.attributes?.[0].used_for_variation === true);
+  check("one variation fetched", (shirt.variations ?? []).length === 1);
+  check("variation sku", shirt.variations?.[0].sku === "SHIRT-S", String(shirt.variations?.[0].sku));
+  check("variation regular price", shirt.variations?.[0].regular_price === "59.00");
+  check("variation sale price", shirt.variations?.[0].sale_price === "49.00");
+  check(
+    "variation attributes",
+    JSON.stringify(shirt.variations?.[0].attributes) === '[{"name":"Size","value":"S"}]',
+    JSON.stringify(shirt.variations?.[0].attributes),
+  );
+
+  /*
+   * One variation with an unrepresentable price must not take the whole
+   * product down with it — `readableVariations` drops it and keeps the rest,
+   * the same treatment `readVariations` already gives a failed request or
+   * malformed JSON.
+   */
+  const unrepresentable = JSON.parse(fixture("woo-variation.json")) as WooVariation;
+  unrepresentable.id = 46;
+  unrepresentable.sku = "SHIRT-M";
+  unrepresentable.attributes = [{ name: "Size", value: "M" }];
+  unrepresentable.prices = { ...unrepresentable.prices, regular_price: "59.5" };
+
+  const warnings: string[] = [];
+  const mixed = wooToProduct(products[1], [variation, unrepresentable], opts, (line) =>
+    warnings.push(line.message),
+  );
+
+  check("mixed variations: product still publishes as variable", mixed.type === "variable", mixed.type);
+  check(
+    "mixed variations: only the readable one is carried",
+    (mixed.variations ?? []).length === 1,
+    JSON.stringify(mixed.variations),
+  );
+  check(
+    "mixed variations: it is the good one",
+    mixed.variations?.[0].sku === "SHIRT-S",
+    String(mixed.variations?.[0].sku),
+  );
+  check(
+    "mixed variations: a warning names the dropped one",
+    warnings.some((message) => message.includes("46")),
+    JSON.stringify(warnings),
+  );
+
+  // A zero-decimal currency must not be divided by a hundred.
+  const vnd = JSON.parse(fixture("woo-store-api.json")) as WooProduct[];
+  vnd[0].prices.currency_code = "VND";
+  vnd[0].prices.currency_minor_unit = 0;
+  vnd[0].prices.price = "25400";
+  vnd[0].prices.regular_price = "25400";
+  vnd[0].prices.sale_price = "25400";
+  const dong = wooToProduct(vnd[0], [], opts);
+  check("VND has no minor unit", dong.regular_price === "25400", String(dong.regular_price));
 }
 
 async function transportTests(): Promise<void> {
@@ -520,7 +631,7 @@ async function orchestratorTests(): Promise<void> {
           const path = new URL(url).pathname;
 
           if (path === "/robots.txt") {
-            return { status: 200, contentType: "text/plain", body: robots };
+            return { status: 200, contentType: "text/plain", body: robots, headers: {} };
           }
           if (path === "/products.json") {
             const page = new URL(url).searchParams.get("page");
@@ -528,9 +639,15 @@ async function orchestratorTests(): Promise<void> {
               status: 200,
               contentType: "application/json",
               body: page === "1" ? fixture("shopify-products.json") : '{"products":[]}',
+              headers: {},
             };
           }
-          return { status: 200, contentType: "text/html", body: "<html>cdn.shopify.com</html>" };
+          return {
+            status: 200,
+            contentType: "text/html",
+            body: "<html>cdn.shopify.com</html>",
+            headers: {},
+          };
         },
         // Present so `crawlShop`'s `"raiseDelayTo" in transport` check finds it,
         // and recording rather than acting on it so the delay-cap test below can
@@ -610,6 +727,48 @@ async function orchestratorTests(): Promise<void> {
   );
 
   /*
+   * The robots check must follow the ADAPTER, not one hardcoded path. A site
+   * that blocks Shopify's entry path but not WooCommerce's has said nothing
+   * about a WooCommerce crawl, and vice versa.
+   */
+  const wooBlocked = fakeTransport("User-agent: *\nDisallow: /wp-json/");
+  await refusesAsync(
+    "a disallowed woocommerce entry path refuses",
+    () =>
+      crawlShop({
+        shopUrl: "https://example.myshopify.com",
+        platform: "woocommerce",
+        limit: 10,
+        imagesPerProduct: 5,
+        minorUnit: 2,
+        fxRate: null,
+        signal: new AbortController().signal,
+        log: () => {},
+        transport: wooBlocked.transport,
+      }),
+    /robots\.txt/i,
+  );
+
+  // ...and the same file says nothing about Shopify's entry path.
+  const shopifyOk = fakeTransport("User-agent: *\nDisallow: /wp-json/");
+  const stillFine = await crawlShop({
+    shopUrl: "https://example.myshopify.com",
+    platform: "shopify",
+    limit: 10,
+    imagesPerProduct: 5,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: shopifyOk.transport,
+  });
+  check(
+    "a rule about another platform does not block shopify",
+    stillFine.products.length === 2,
+    String(stillFine.products.length),
+  );
+
+  /*
    * The time-cap finding: a site can ask for a `Crawl-delay` of any size, and
    * this crawl must not adopt it wholesale — the worker has only four job slots
    * for the whole installation, and honouring an hour-long delay would hold one
@@ -633,14 +792,564 @@ async function orchestratorTests(): Promise<void> {
     huge.raisedTo.length === 1 && huge.raisedTo[0] === MAX_CRAWL_DELAY_MS,
     `raiseDelayTo was called with: ${JSON.stringify(huge.raisedTo)}`,
   );
+
+  /*
+   * Detection reads the homepage ONCE and scores every adapter against it. It
+   * has to fetch, so it happens after robots.txt like everything else.
+   */
+  function homepageTransport(html: string, headers: Record<string, string> = {}) {
+    const asked: string[] = [];
+
+    return {
+      asked,
+      transport: {
+        async fetchText(url: string) {
+          asked.push(url);
+          const path = new URL(url).pathname;
+
+          if (path === "/robots.txt") {
+            return { status: 200, contentType: "text/plain", body: "", headers: {} };
+          }
+          if (path === "/") {
+            return { status: 200, contentType: "text/html", body: html, headers };
+          }
+          if (path === "/products.json") {
+            const page = new URL(url).searchParams.get("page");
+            return {
+              status: 200,
+              contentType: "application/json",
+              body: page === "1" ? fixture("shopify-products.json") : '{"products":[]}',
+              headers: {},
+            };
+          }
+          return { status: 404, contentType: "text/plain", body: "", headers: {} };
+        },
+      },
+    };
+  }
+
+  const auto = homepageTransport('<html><script src="https://cdn.shopify.com/x.js"></script></html>');
+  const detected = await crawlShop({
+    shopUrl: "https://example.test",
+    platform: "auto",
+    limit: 10,
+    imagesPerProduct: 5,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: auto.transport,
+  });
+  check("auto detected shopify", detected.platform === "shopify", detected.platform);
+  check("the homepage was read once", auto.asked.filter((u) => u.endsWith("/")).length === 1);
+
+  /*
+   * The ordering finding: for `platform: "auto"`, detection's own fetch of `/`
+   * is a request to this host, made right after robots.txt — so the
+   * Crawl-delay floor has to be raised BEFORE that fetch, not after adapter
+   * selection. `events` interleaves both `raiseDelayTo` calls and fetched
+   * paths in the order they actually happened, which a transport exposing
+   * only two separate arrays could not prove.
+   */
+  const events: string[] = [];
+  const orderedTransport = {
+    async fetchText(url: string) {
+      const path = new URL(url).pathname;
+      events.push(`fetch ${path}`);
+
+      if (path === "/robots.txt") {
+        return {
+          status: 200,
+          contentType: "text/plain",
+          body: "User-agent: *\nCrawl-delay: 2",
+          headers: {},
+        };
+      }
+      if (path === "/") {
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: '<html><script src="https://cdn.shopify.com/x.js"></script></html>',
+          headers: {},
+        };
+      }
+      if (path === "/products.json") {
+        const page = new URL(url).searchParams.get("page");
+        return {
+          status: 200,
+          contentType: "application/json",
+          body: page === "1" ? fixture("shopify-products.json") : '{"products":[]}',
+          headers: {},
+        };
+      }
+      return { status: 404, contentType: "text/plain", body: "", headers: {} };
+    },
+    raiseDelayTo(ms: number) {
+      events.push(`raiseDelayTo ${ms}`);
+    },
+  };
+
+  await crawlShop({
+    shopUrl: "https://example.test",
+    platform: "auto",
+    limit: 10,
+    imagesPerProduct: 5,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: orderedTransport,
+  });
+
+  const delayIndex = events.indexOf("raiseDelayTo 2000");
+  const homepageIndex = events.indexOf("fetch /");
+  check(
+    "the Crawl-delay floor is raised before detection fetches the home page",
+    delayIndex !== -1 && homepageIndex !== -1 && delayIndex < homepageIndex,
+    JSON.stringify(events),
+  );
+
+  // Nothing recognisable falls back to the generic adapter rather than refusing.
+  const unknown = homepageTransport("<html><body>a shop</body></html>");
+  await refusesAsync(
+    "an unrecognised site falls back to generic and needs a sitemap",
+    () =>
+      crawlShop({
+        shopUrl: "https://example.test",
+        platform: "auto",
+        limit: 10,
+        imagesPerProduct: 5,
+        minorUnit: 2,
+        fxRate: null,
+        signal: new AbortController().signal,
+        log: () => {},
+        transport: unknown.transport,
+      }),
+    /sitemap/i,
+  );
+}
+
+async function wooOrchestratorTests(): Promise<void> {
+  console.log("\nWooCommerce orchestrator");
+
+  interface WooScript {
+    /** Fixed status to return for every products-list request, overriding `pages`. */
+    productsStatus?: number;
+    /** Per-page product arrays; index 0 is page 1. Missing/exhausted pages answer `[]`. */
+    pages?: WooProduct[][];
+    /** Per-variation-id overrides. A ready-to-serve variation is looked up by id otherwise. */
+    variations?: Record<number, { status: number; body?: string }>;
+  }
+
+  const knownVariations: Record<number, WooProduct> = {};
+
+  /** A transport that answers Store API requests from a script and records what was asked for. */
+  function fakeWooTransport(script: WooScript) {
+    const asked: string[] = [];
+    const pages = script.pages ?? [];
+
+    return {
+      asked,
+      transport: {
+        async fetchText(url: string) {
+          asked.push(url);
+          const parsed = new URL(url);
+
+          if (parsed.pathname === "/robots.txt") {
+            return { status: 200, contentType: "text/plain", body: "", headers: {} };
+          }
+
+          if (parsed.pathname === "/wp-json/wc/store/v1/products") {
+            if (script.productsStatus !== undefined) {
+              return {
+                status: script.productsStatus,
+                contentType: "application/json",
+                body: "",
+                headers: {},
+              };
+            }
+            const page = Number(parsed.searchParams.get("page") ?? "1");
+            return {
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify(pages[page - 1] ?? []),
+              headers: {},
+            };
+          }
+
+          const variationMatch = /\/wp-json\/wc\/store\/v1\/products\/(\d+)$/.exec(parsed.pathname);
+          if (variationMatch !== null) {
+            const id = Number(variationMatch[1]);
+            const override = script.variations?.[id];
+            if (override !== undefined) {
+              return {
+                status: override.status,
+                contentType: "application/json",
+                body: override.body ?? "",
+                headers: {},
+              };
+            }
+            const known = knownVariations[id];
+            if (known !== undefined) {
+              return {
+                status: 200,
+                contentType: "application/json",
+                body: JSON.stringify(known),
+                headers: {},
+              };
+            }
+            return { status: 404, contentType: "application/json", body: "", headers: {} };
+          }
+
+          return { status: 404, contentType: "text/plain", body: "not found", headers: {} };
+        },
+      },
+    };
+  }
+
+  const wooProducts = JSON.parse(fixture("woo-store-api.json")) as WooProduct[];
+  const tote = wooProducts[0];
+  const linenShirt = wooProducts[1];
+
+  const variation45 = JSON.parse(fixture("woo-variation.json")) as WooProduct;
+  const variation46: WooProduct = {
+    ...variation45,
+    id: 46,
+    name: "Linen Shirt - M",
+    sku: "SHIRT-M",
+    // `attributes` on a variation record is actually `{ name, value }[]`, not the
+    // product-level `{ name, terms }[]` shape `WooProduct` declares — the same
+    // mismatch `variationOf` in the adapter itself casts through.
+    attributes: [{ name: "Size", value: "M" }] as unknown as WooProduct["attributes"],
+  };
+  knownVariations[45] = variation45;
+  knownVariations[46] = variation46;
+
+  const baseInput = {
+    shopUrl: "https://shop.example",
+    platform: "woocommerce" as const,
+    imagesPerProduct: 10,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+  };
+
+  // 1. A successful two-page crawl: page 1 has both products, page 2 is empty.
+  const twoPage = fakeWooTransport({ pages: [[tote, linenShirt], []] });
+  const outcome = await crawlShop({ ...baseInput, limit: 100, transport: twoPage.transport });
+
+  check(
+    "products come back mapped",
+    outcome.products.map((product) => product.slug).sort().join(",") === "cotton-tote,linen-shirt",
+    JSON.stringify(outcome.products.map((product) => product.slug)),
+  );
+
+  /*
+   * Asserted on the recorded requests, not the product count: a crawl that kept
+   * paging past the empty page would still yield 2 products, since nothing
+   * would be there to add to them.
+   */
+  check(
+    "paging stopped on the empty page",
+    twoPage.asked.length === 5 &&
+      twoPage.asked[1].includes("page=1") &&
+      twoPage.asked[4].includes("page=2"),
+    JSON.stringify(twoPage.asked),
+  );
+
+  // 3. One request per variation.
+  check(
+    "one variation request per variation",
+    twoPage.asked.some((url) => /\/wp-json\/wc\/store\/v1\/products\/45$/.test(new URL(url).pathname)),
+    JSON.stringify(twoPage.asked),
+  );
+
+  // 2. ctx.limit stops mid-page: two simple products on one page, limit 1.
+  const secondTote: WooProduct = { ...tote, id: 22, slug: "cotton-tote-b", name: "Cotton Tote B" };
+  const limited = fakeWooTransport({ pages: [[tote, secondTote]] });
+  const cappedOutcome = await crawlShop({ ...baseInput, limit: 1, transport: limited.transport });
+  check("ctx.limit stops mid-page", cappedOutcome.products.length === 1, String(cappedOutcome.products.length));
+
+  // 4. A variation that 404s is skipped; the product still publishes.
+  const partialFail = fakeWooTransport({
+    pages: [[linenShirt], []],
+    variations: { 46: { status: 404 } },
+  });
+  const partialOutcome = await crawlShop({ ...baseInput, limit: 100, transport: partialFail.transport });
+  const partialShirt = partialOutcome.products.find((product) => product.slug === "linen-shirt");
+  check("the product still publishes despite a failed variation", partialShirt !== undefined);
+  check(
+    "the failed variation is skipped, one fewer than the raw count",
+    (partialShirt?.variations ?? []).length === 1,
+    JSON.stringify(partialShirt?.variations),
+  );
+
+  // 5. Every variation failing degrades the product to simple, at the parent's price.
+  const allFail = fakeWooTransport({
+    pages: [[linenShirt], []],
+    variations: { 45: { status: 404 }, 46: { status: 404 } },
+  });
+  const degradedOutcome = await crawlShop({ ...baseInput, limit: 100, transport: allFail.transport });
+  const degraded = degradedOutcome.products.find((product) => product.slug === "linen-shirt");
+  check("every variation failing degrades the product to simple", degraded?.type === "simple", String(degraded?.type));
+  /*
+   * "59.00" is not invented: it comes straight from `linenShirt.prices.regular_price`
+   * ("5900", the fixture's own Store API answer for the PARENT product), read through
+   * the same `variations.length === 0` branch in `toProduct` that a genuinely simple
+   * product goes through. Nothing here fabricates a price for a variable product that
+   * lost all its variations — the parent's own price is real API data.
+   */
+  check(
+    "the degraded price is the parent's own, not invented",
+    degraded?.regular_price === "59.00",
+    String(degraded?.regular_price),
+  );
+
+  // 6. Distinguish a 404 on the products endpoint from any other status.
+  const productsOff = fakeWooTransport({ productsStatus: 404 });
+  await refusesAsync(
+    "a 404 on the products endpoint says the Store API is off",
+    () => crawlShop({ ...baseInput, limit: 100, transport: productsOff.transport }),
+    /Store API.*turned off/i,
+  );
+
+  const productsBroken = fakeWooTransport({ productsStatus: 500 });
+  await refusesAsync(
+    "any other status gives the generic message",
+    () => crawlShop({ ...baseInput, limit: 100, transport: productsBroken.transport }),
+    /Store API answered 500/i,
+  );
+}
+
+function magentoTests(): void {
+  console.log("\nMagento mapping");
+
+  const payload = JSON.parse(fixture("magento-graphql.json")) as {
+    data: { products: { items: MagentoItem[] } };
+  };
+  const items = payload.data.products.items;
+  const opts = { imagesPerProduct: 10, fxRate: null };
+
+  const mug = magentoToProduct(items[0], opts);
+
+  check("name", mug.name === "Stoneware Mug", mug.name);
+  check("slug from url_key", mug.slug === "stoneware-mug", String(mug.slug));
+  check("sku", mug.sku === "MUG-24", String(mug.sku));
+  check("description html", mug.description === "<p>Heavy.</p>", String(mug.description));
+  check("category", JSON.stringify(mug.categories) === '["Kitchen"]');
+  check("in stock", mug.instock === true);
+
+  /*
+   * Magento sends price as a JSON NUMBER, and `final_price` is what is charged
+   * while `regular_price` is the list price — so a discounted product maps the
+   * lower one to sale_price, like WooCommerce and unlike Shopify's inversion.
+   */
+  check("regular price", mug.regular_price === "24.00", String(mug.regular_price));
+  check("sale price", mug.sale_price === "19.50", String(mug.sale_price));
+
+  // De-duplicated: `image` repeats the first gallery entry on most stores.
+  check(
+    "images de-duplicated and ordered",
+    JSON.stringify(mug.images) ===
+      '["https://m2.example/media/catalog/product/mug.jpg","https://m2.example/media/catalog/product/mug-2.jpg"]',
+    JSON.stringify(mug.images),
+  );
+
+  const plate = magentoToProduct(items[1], opts);
+  check("out of stock", plate.instock === false);
+  check("no sale when equal", plate.sale_price === undefined);
+  // A final_price equal to regular_price is not a discount — lessThan(final,
+  // regular, ...) must be false, not just "close enough" under Number().
+  check("regular price kept when equal", plate.regular_price === "8.00", String(plate.regular_price));
+  check("empty description omitted", plate.description === undefined);
+  check("no images", JSON.stringify(plate.images) === "[]");
+
+  const converted = magentoToProduct(items[0], { ...opts, fxRate: 25400 });
+  check("fx applied", converted.regular_price === "609600.00", String(converted.regular_price));
+}
+
+async function genericTests(): Promise<void> {
+  console.log("\nGeneric (schema.org)");
+
+  const productHtml = fixture("jsonld-product.html");
+  const blocks = jsonLdBlocks(productHtml);
+  check("one json-ld block", blocks.length === 1, String(blocks.length));
+
+  const opts = { imagesPerProduct: 10, fxRate: null };
+  const scarf = productFromJsonLd(blocks[0], opts);
+
+  check("found the Product inside @graph", scarf !== null);
+  check("name", scarf?.name === "Wool Scarf", String(scarf?.name));
+  check("sku", scarf?.sku === "SCARF-9", String(scarf?.sku));
+  check("description", scarf?.description === "Warm.", String(scarf?.description));
+  check("price from offers", scarf?.regular_price === "42.00", String(scarf?.regular_price));
+  check("in stock from availability", scarf?.instock === true);
+  check("brand kept as meta", scarf?.custom_meta?.brand === "Northbound");
+  check(
+    "images",
+    JSON.stringify(scarf?.images) ===
+      '["https://shop.example/scarf-1.jpg","https://shop.example/scarf-2.jpg"]',
+    JSON.stringify(scarf?.images),
+  );
+
+  // A block with no Product at all must answer null, not throw.
+  check("no Product means null", productFromJsonLd({ "@type": "WebSite" }, opts) === null);
+
+  const ogHtml = fixture("og-product.html");
+  check("meta by property", metaContent(ogHtml, "og:title") === "Canvas Belt");
+  check("missing meta is null", metaContent(ogHtml, "og:description") === null);
+
+  /*
+   * `metaContent` extracts bounded `<meta ...>` segments before matching
+   * attributes, so a single crafted tag with a very long attribute value and
+   * no other `>` in the response cannot make it scan the whole page. A tag
+   * past the bound simply does not match — that is the point, not a bug —
+   * and a normal tag after it must still be found.
+   */
+  const tooLongMeta = `<meta property="og:title" content="${"x".repeat(3000)}">`;
+  check("a meta tag past the bound does not match", metaContent(tooLongMeta, "og:title") === null);
+
+  const afterTooLong = `${tooLongMeta}<meta property="og:title" content="Found Me">`;
+  check(
+    "a normal tag after a too-long one is still found",
+    metaContent(afterTooLong, "og:title") === "Found Me",
+  );
+
+  const belt = productFromMeta(ogHtml, "https://shop.example/belt", opts);
+  check("og name", belt?.name === "Canvas Belt", String(belt?.name));
+  check("og price", belt?.regular_price === "18.50", String(belt?.regular_price));
+  check("og image", JSON.stringify(belt?.images) === '["https://shop.example/belt.jpg"]');
+
+  // Without a price there is nothing worth importing.
+  check(
+    "no price means null",
+    productFromMeta('<meta property="og:title" content="X" />', "https://x.example/x", opts) === null,
+  );
+
+  check(
+    "sitemap index urls",
+    JSON.stringify(sitemapUrls(fixture("sitemap-index.xml"))) ===
+      '["https://shop.example/sitemap-products.xml"]',
+  );
+  check("sitemap product urls", sitemapUrls(fixture("sitemap-products.xml")).length === 3);
+
+  /*
+   * A child sitemap of a <sitemapindex> is a discovered url exactly like a
+   * product page — only the top-level /sitemap.xml is checked against
+   * robots.txt before this adapter starts, so `discover` itself has to consult
+   * `ctx.isAllowed` for each child, or a `Disallow` naming one is silently
+   * ignored.
+   */
+  const sitemapIndexXml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    "<sitemap><loc>https://shop.example/sitemap-products.xml</loc></sitemap>",
+    "<sitemap><loc>https://shop.example/sitemap_drafts.xml</loc></sitemap>",
+    "</sitemapindex>",
+  ].join("\n");
+
+  const fetchedChildren: string[] = [];
+  const discoverCtx: CrawlContext = {
+    shopUrl: new URL("https://shop.example"),
+    transport: {
+      async fetchText(url: string) {
+        const path = new URL(url).pathname;
+
+        if (path === "/sitemap.xml") {
+          return { status: 200, contentType: "application/xml", body: sitemapIndexXml, headers: {} };
+        }
+
+        fetchedChildren.push(path);
+
+        if (path === "/sitemap-products.xml") {
+          return {
+            status: 200,
+            contentType: "application/xml",
+            body: fixture("sitemap-products.xml"),
+            headers: {},
+          };
+        }
+
+        return { status: 200, contentType: "application/xml", body: "<urlset></urlset>", headers: {} };
+      },
+    },
+    limit: 100,
+    imagesPerProduct: 10,
+    minorUnit: 2,
+    fxRate: null,
+    log: () => {},
+    signal: new AbortController().signal,
+    isAllowed: (pathname: string) => pathname !== "/sitemap_drafts.xml",
+  };
+
+  const discovered = await discover(discoverCtx);
+
+  check(
+    "a disallowed child sitemap is never fetched",
+    !fetchedChildren.includes("/sitemap_drafts.xml"),
+    JSON.stringify(fetchedChildren),
+  );
+  check(
+    "an allowed sibling child sitemap is still read",
+    discovered.length === 3,
+    JSON.stringify(discovered),
+  );
+}
+
+function crawlOptionsTests(): void {
+  console.log("\ncrawlOptionsSchema");
+
+  // The stored-run replay case: a run's options are parsed back out of
+  // Postgres JSON months after it ran, and a named platform must survive that
+  // round trip unchanged rather than being coerced back to "auto".
+  const stored = crawlOptionsSchema.parse({
+    shopUrl: "https://shop.example",
+    platform: "shopify",
+  });
+  check("a stored platform survives parsing", stored.platform === "shopify", stored.platform);
+
+  // A blob with no `platform` at all — an even older stored run, from before
+  // this field existed — defaults to "auto" rather than being refused.
+  const defaulted = crawlOptionsSchema.parse({ shopUrl: "https://shop.example" });
+  check(
+    "a missing platform defaults to auto",
+    defaulted.platform === "auto",
+    defaulted.platform,
+  );
+
+  // "etsy" is schema-valid even though nothing in this build can run it — the
+  // worker refuses it at run time (see `adapterNamed` in
+  // lib/sources/crawl/index.ts), not the schema. A run stored before Etsy was
+  // disabled, or one that never got past validation, must still parse.
+  const etsy = crawlOptionsSchema.parse({ shopUrl: "https://shop.example", platform: "etsy" });
+  check("etsy still parses as schema-valid", etsy.platform === "etsy", etsy.platform);
+
+  refuses(
+    "an invalid shopUrl is rejected",
+    () => crawlOptionsSchema.parse({ shopUrl: "not a url" }),
+    /web address/i,
+  );
+
+  // `lib/crawl-options.ts` re-exports `minorUnitFor` rather than a Client
+  // Component reaching into `lib/sources/crawl/money.ts` directly, and that
+  // re-export is what actually gets imported — so it is asserted here, through
+  // the same path a Client Component uses, not through the original module.
+  check("VND has no minor unit, through the re-export", reExportedMinorUnitFor("VND") === 0);
+  check("USD has two, through the re-export", reExportedMinorUnitFor("USD") === 2);
 }
 
 async function main(): Promise<void> {
   moneyTests();
   robotsTests();
   shopifyTests();
+  wooTests();
+  magentoTests();
+  await genericTests();
+  crawlOptionsTests();
   await transportTests();
   await orchestratorTests();
+  await wooOrchestratorTests();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {

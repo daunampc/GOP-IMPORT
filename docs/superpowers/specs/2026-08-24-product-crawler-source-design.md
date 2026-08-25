@@ -10,22 +10,33 @@ Phạm vi: một repo — `clients/manager-push-product-wordpress` (web + worker
 Plugin `GPM_toshstack` **không đổi**: crawler không thêm bất kỳ endpoint nào cho
 plugin.
 
-**Trạng thái: §1–§11 đã cài đặt xong (kế hoạch 1 — chỉ Shopify). §12 chưa làm.**
-Tài liệu này được **cập nhật lại sau khi code chạy**, không để nguyên bản thiết
-kế ban đầu — vì một tài liệu sai còn tệ hơn không có tài liệu. Mỗi chỗ cài đặt
-đi khác bản đầu được đánh dấu bằng một khối `> **Sửa so với bản đầu**` ngay tại
-mục của nó, kèm lý do, chứ không lặng lẽ viết lại. Danh sách đầy đủ từng bước
-nằm ở `.superpowers/sdd/progress.md`; đây là tóm tắt:
+**Trạng thái: §1–§11 đã cài đặt xong cho `shopify`, `woocommerce`, `magento` và
+`generic` (kế hoạch 1 + kế hoạch 2). `etsy` và §12 (extension Chrome) chưa
+làm.** Tài liệu này được **cập nhật lại sau khi code chạy**, không để nguyên
+bản thiết kế ban đầu — vì một tài liệu sai còn tệ hơn không có tài liệu. Mỗi
+chỗ cài đặt đi khác bản đầu được đánh dấu bằng một khối
+`> **Sửa so với bản đầu**` ngay tại mục của nó, kèm lý do, chứ không lặng lẽ
+viết lại. Danh sách đầy đủ từng bước nằm ở `.superpowers/sdd/progress.md`; đây
+là tóm tắt:
 
 | § | Bản đầu | Thực tế |
 |---|---|---|
-| §4 | 5 adapter: `shopify`, `woocommerce`, `magento`, `generic`, `etsy` | kế hoạch 1 chỉ ship **`shopify`**; bốn adapter còn lại là kế hoạch 2, chưa có dòng code nào |
+| §4 | 5 adapter: `shopify`, `woocommerce`, `magento`, `generic`, `etsy` | kế hoạch 1 ship `shopify`; kế hoạch 2 ship thêm **`woocommerce`, `magento`, `generic`**; chỉ còn **`etsy`** chưa có dòng code nào, vì nó cần trình duyệt (§12) |
+| §4 | WooCommerce: Store API, hoặc v3 REST nếu chủ shop tự đưa key | v3 REST **không xây**: chỉ dùng Store API công khai, không cần auth — lưu key của khách là một mặt bằng ứng dụng này không cần có |
+| §4 | Magento: `/graphql`, không nói rõ verb | đi qua **GET**, vì `CrawlTransport` cố tình chỉ phơi ra một verb — đây đúng là chỗ trình duyệt của khách sẽ đứng thay ở §12, và một relay nhận POST tuỳ ý là mặt bằng lớn hơn nhiều để giao cho người khác |
+| §4 | `generic`: JSON-LD → microdata → OG/`product:price:*` → sitemap | chỉ **JSON-LD và Open Graph**; bỏ microdata và DOM heuristic — cả hai cần duyệt cây DOM thật, viết bằng regex là cách một crawler bắt đầu bịa giá, nên để dành cho đường trình duyệt |
+| §4 | Magento map cả `SimpleProduct` lẫn `ConfigurableProduct` | mọi sản phẩm map thành **`simple`**; đọc biến thể `ConfigurableProduct` cần một hình dạng GraphQL query khác cho mỗi sản phẩm — cố tình để lại chứ không xây nửa vời |
+| §4.1 | mỗi adapter tự biết đơn vị nhỏ của tiền tệ nó đọc | `minorUnitFor` dọn về **một chỗ** trong `money.ts` trước khi kịp có ba bản sao — một tiền tệ thêm vào một chỗ mà quên hai chỗ kia là giá sai mười lần |
+| §4.1 | so `sale_price` với `regular_price` để quyết có phải giảm giá không | thêm `lessThan` vào `money.ts`, so trên **đơn vị nhỏ nguyên**; cả ba adapter dùng nó — hai trong số đó trước so bằng `Number()` |
+| §4.2 | Woo dừng trang theo header `X-WP-Total`/`X-WP-TotalPages`; Magento theo `total_count` trong `page_info` | **không đọc** header hay field đó ở đâu cả: cả hai dừng đúng kiểu Shopify — trang rỗng thì dừng; Magento vẫn xin `total_count`/`page_info` trong query nhưng nhận về rồi bỏ không dùng |
+| §4 | `CrawlAdapter` có `discover(ctx): Promise<string[]>` là một method chung | không có `discover` trên interface; thay bằng **`robotsPaths`** (mỗi adapter tự khai path nó sắp gọi) và **`CrawlContext.isAllowed`** (cho adapter phát hiện URL lúc chạy — `generic`, từ sitemap — soát từng URL khi đọc tới) |
 | §4.1 / §6 | giá tính bằng số thực (nhân/chia trực tiếp trên `number`) | `lib/sources/crawl/money.ts` giữ giá là **chuỗi**, đếm chữ số thay vì chia nổi, và **từ chối** một giá trị mất chữ số thập phân thay vì âm thầm làm tròn |
 | §6 | thử `?currency=USD` trước khi hỏi tỉ giá tay | **không làm** — operator luôn phải tự gõ `sourceCurrency`, crawler tin đúng con số đó |
 | §7.1 | SSRF guard với `fetch(url, { redirect: "follow" })` | `follow` để lọt guard ở hop chuyển hướng thứ hai; đổi sang `redirect: "manual"`, soi lại từng hop, có trần số hop |
 | §7.2 | robots.txt so khớp theo tiền tố chuỗi | rule `*`/`$` thật của Shopify khớp **không trúng gì cả**; thêm dịch wildcard sang `RegExp` |
+| §7.2 | orchestrator kiểm robots.txt cho **một** path cố định | mỗi adapter tự khai `robotsPaths` (xem hàng §4 ở trên) — path cũ chỉ đúng cho `shopify`, và hỏi site về một request ba trong bốn adapter không bao giờ gọi, mà lại quên hỏi về request thật của chúng |
 | §7.4 | mỗi lượt gọi dựng transport riêng khi cần | hai transport làm mất độ trễ per-host giữa robots.txt và request đầu tiên; gộp về **một** transport, nâng trần độ trễ bằng `raiseDelayTo()` |
-| §8.1 | `platform: auto` + ghi đè tay; `transport: browser` khoá kèm lý do | không có `auto`; UI hiện đủ 5 tên, khoá 4 cái không phải `shopify`; trường `transport` **không hiện lên form** vì `browser` chưa xây ở kế hoạch này |
+| §8.1 | `platform: auto` + ghi đè tay; `transport: browser` khoá kèm lý do | kế hoạch 1 chưa có `auto`, khoá 4/5 platform; **kế hoạch 2 xây `auto`**: chấm điểm mọi adapter trên một request trang chủ, điểm cao nhất thắng, không nhận diện được thì rơi về `generic` chứ không từ chối — form giờ chỉ khoá `etsy`. Trường `transport` vẫn **không hiện lên form**, vì `browser` vẫn chưa xây (§12, kế hoạch 3) |
 | §8.2 | (không nói riêng ngôn ngữ của hộp thoại) | Cancel/Stop/Delete ban đầu tả một crawl bằng đúng câu chữ của import ("plugin đã ghi", "đã lên site"); sửa lại bằng bản dành riêng cho crawl |
 | §10 bước 3 | cần một migration cho `kind: "crawl"` | **không cần** — `db/schema.ts:266` đã ghi rõ `kind` là enum ở mức TypeScript, không phải Postgres |
 
@@ -217,15 +228,57 @@ Mỗi adapter thử **đường nhanh** (fetch + JSON) trước, chỉ leo lên 
 | `etsy` | *không có* — Etsy không mở JSON | trang listing, `il_fullxfull`, lọc ảnh review |
 
 > **Sửa so với bản đầu.** Bảng trên liệt năm adapter. Việc cài đặt tách làm hai
-> kế hoạch (xem §10): **kế hoạch 1** — bản đang chạy — chỉ ship `shopify`
-> (`lib/sources/crawl/adapters/shopify.ts`); `woocommerce`, `magento`,
-> `generic`, `etsy` là **kế hoạch 2**, chưa có một dòng code nào. `ADAPTERS` ở
-> `lib/sources/crawl/index.ts` hiện chỉ có một phần tử, và `pickAdapter()` từ
-> chối mọi platform khác bằng một lỗi rõ ràng thay vì thử đoán.
+> kế hoạch (xem §10): **kế hoạch 1** ship `shopify`
+> (`lib/sources/crawl/adapters/shopify.ts`); **kế hoạch 2** — bản đang chạy —
+> ship thêm `woocommerce`, `magento` và `generic`. Chỉ `etsy` là còn chưa có
+> một dòng code nào: nó không mở JSON, nên đọc được nó cần trình duyệt thật
+> (§12), và đó là kế hoạch 3. `ADAPTERS` ở `lib/sources/crawl/index.ts` giờ có
+> bốn phần tử; `adapterNamed()` (trước là `pickAdapter()`) từ chối `etsy` bằng
+> một lỗi rõ ràng — *"Etsy needs the browser crawler"* — thay vì thử đoán.
+>
+> Interface `CrawlAdapter` thật cũng không giống khối code trên: không có
+> `discover(ctx): Promise<string[]>` chung cho mọi adapter. Thay vào đó là
+> **`robotsPaths: ReadonlyArray<string>`** — mỗi adapter tự khai những path nó
+> sắp gọi, để kiểm với robots.txt đúng request sẽ thật sự xảy ra — và
+> **`CrawlContext.isAllowed(pathname)`** cho adapter phát hiện URL lúc chạy
+> chứ không biết trước: `generic` đọc URL từ sitemap, nên soát từng URL bằng
+> `isAllowed` khi đọc tới, thay vì có thể khai trước trong `robotsPaths`.
+>
+> Ba chỗ khác giữa ba adapter mới và bảng thiết kế ở trên:
+>
+> - **WooCommerce v3 REST — không xây.** Store API công khai không cần auth,
+>   và đó là toàn bộ lý do chọn nó: bắt chủ shop tự đưa API key rồi ứng dụng
+>   này phải lưu, mã hoá và được tin cậy với chiếc key đó là một mặt bằng bảo
+>   mật mà một tính năng chỉ-đọc không cần có. Không nơi nào trong code nhận
+>   hay lưu bất kỳ credential nào cho crawler.
+> - **Magento GraphQL đi qua GET, không phải POST.** `CrawlTransport`
+>   (`lib/sources/crawl/types.ts`) cố tình chỉ phơi ra một verb —
+>   `fetchText(url)` — vì đây đúng là chỗ trình duyệt Chrome của khách sẽ đứng
+>   thay ở §12, và một relay có thể bị yêu cầu POST bất kỳ body nào là một mặt
+>   bằng lớn hơn nhiều để giao cho người lạ so với một relay chỉ biết hỏi.
+>   Một Magento install chỉ nhận POST cho `/graphql` sẽ khiến adapter báo lỗi
+>   rõ ràng thay vì âm thầm thất bại.
+> - **`generic` chỉ đọc JSON-LD và Open Graph, không microdata, không DOM
+>   heuristic.** `lib/sources/crawl/html.ts` tự nói lý do: cả hai cần duyệt
+>   cây DOM thật, còn "giả vờ" làm điều đó bằng regex là cách một crawler bắt
+>   đầu bịa giá. Bị hoãn sang đường trình duyệt (§5/§12), nơi có một DOM thật
+>   để duyệt.
+>
+> Và một chỗ tương tự cho `magento`: mọi sản phẩm map thành **`type: "simple"`**
+> (`toProduct()` trong `magento.ts`) — kể cả những sản phẩm `ConfigurableProduct`.
+> Đọc biến thể của nó cần một hình dạng GraphQL query khác cho mỗi sản phẩm;
+> việc đó bị để lại có chủ đích thay vì xây nửa vời.
 
 Nhận diện nền tảng chấm theo điểm, không theo một dấu hiệu duy nhất: header/cookie
 (`x-shopify-*`, `wp-content`, `X-Magento-*`), `<meta name="generator">`, URL asset,
 hình dạng đường dẫn. Người dùng luôn **ghi đè được** lựa chọn ở form.
+
+> **Sửa so với bản đầu.** Kế hoạch 1 chưa có lựa chọn `auto` (xem §8.1). Kế
+> hoạch 2 xây nó: `detectPlatform()` trong `lib/sources/crawl/index.ts` tốn
+> đúng **một** request vào trang chủ, chấm điểm cả bốn adapter đã ship trên
+> cùng response đó, và lấy điểm cao nhất. Dưới một ngưỡng (`DETECT_THRESHOLD`),
+> không phải là một lỗi — request rơi về `generic`, vì đó chính xác là việc
+> `generic` sinh ra để làm, và từ chối thẳng sẽ biến mọi shop lạ thành ngõ cụt.
 
 ### 4.1 Giá theo đơn vị nhỏ
 
@@ -244,11 +297,37 @@ hình dạng đường dẫn. Người dùng luôn **ghi đè được** lựa c
 > có nhiều chữ số thập phân hơn `minorUnit` cho phép, thay vì âm thầm làm tròn
 > sai giá.
 
+> **Sửa so với bản đầu, tiếp — kế hoạch 2.** Hai điểm nữa lộ ra khi ba adapter
+> mới cùng cần đến `money.ts`:
+>
+> - **`minorUnitFor` dọn về một chỗ.** Trước khi có adapter thứ hai, biết
+>   VND/JPY có `minor_unit = 0` chỉ là kiến thức của Shopify. Thêm
+>   `woocommerce`, `magento` (qua `generic` giá đọc theo `priceCurrency`) đúng
+>   lúc bảng tiền tệ đó sắp bị chép tay thành ba bản — và một tiền tệ thêm vào
+>   một bản mà quên hai bản kia là giá sai mười lần. Hàm này giờ sống một lần
+>   trong `money.ts`, cả ba adapter gọi chung.
+> - **Thêm `lessThan`.** Mỗi adapter đều phải tự quyết "giá này có phải giảm
+>   giá không" (so `sale_price`/`final_price` với `regular_price`). Hàm mới so
+>   trên **đơn vị nhỏ nguyên**, không qua số thực — cùng lý do `fromMinorUnits`/
+>   `fromDecimal` tồn tại. Cả ba adapter đọc qua nó; hai trong số đó (`magento`,
+>   `generic` trước khi có `lessThan` sẽ phải tự viết) đáng lẽ so bằng
+>   `Number()`.
+
 ### 4.2 Phân trang
 
 Shopify: tăng `page` đến khi mảng `products` rỗng. Woo: `X-WP-Total` /
 `X-WP-TotalPages`. Magento: `total_count` trong `page_info`. Mọi vòng lặp đều có
 **trần cứng** — xem §7.4.
+
+> **Sửa so với bản đầu.** `woocommerce.ts` và `magento.ts` không đọc header
+> `X-WP-Total`/`X-WP-TotalPages` hay field `total_count`/`page_info` ở đâu cả.
+> Cả hai dừng đúng kiểu Shopify: tăng `page`, dừng khi trang trả về rỗng.
+> `PRODUCTS_QUERY` của Magento vẫn xin `total_count page_info{current_page
+> total_pages}` trong câu query — giữ nguyên từ bản thiết kế — nhưng không có
+> dòng code nào đọc lại giá trị đó; hai field này bay theo response mà không ai
+> dùng. Dừng theo trang rỗng đơn giản hơn và đủ đúng cho `MAX_PAGES = 200`
+> đang có, nên không có bug thật nào bị bắt ở đây — chỉ là thiết kế tả một cơ
+> chế mà code không dùng tới.
 
 ---
 
@@ -346,6 +425,14 @@ Tải `robots.txt` trước, cache trong suốt run. Nếu đường dẫn sản
 > `RegExp` (`matcherFor`), có xử lý `*` và `$`, trước khi so khớp; longest-match
 > thắng, `Allow` phá vỡ trường hợp bằng nhau.
 
+> **Sửa so với bản đầu, kế hoạch 2.** "Đường dẫn sản phẩm" ở trên từng là
+> **một** path cố định (`/products.json` — đúng cho mỗi `shopify`) kiểm thay
+> cho mọi adapter. Có thêm `woocommerce`/`magento`/`generic`, path đó sai cho
+> ba trong bốn: hỏi site về một request sẽ không bao giờ xảy ra, và bỏ sót
+> câu hỏi về request thật sự sắp gọi. Sửa ở `bc72b56`: mỗi `CrawlAdapter` tự
+> khai `robotsPaths` (chi tiết ở khối sửa của §4), và orchestrator lặp qua
+> đúng path của adapter đang chạy.
+
 ### 7.3 CAPTCHA
 
 Nhận diện trang chặn (Cloudflare interstitial, marker reCAPTCHA/hCaptcha) và
@@ -399,18 +486,28 @@ Form, dùng component sẵn có trong `components/ui/`:
 - **Transport**: `server` (mặc định) hoặc `browser` — đi qua Chrome của khách (§12).
   Ô `browser` bị khoá và ghi lý do khi chưa có thiết bị nào online.
 
-> **Sửa so với bản đầu, ở hai điểm.** Không có tuỳ chọn `auto`:
-> `CRAWL_PLATFORMS` (`lib/crawl-options.ts`) chỉ liệt tên nền tảng thật; form
-> hiện đủ cả 5 tên nhưng khoá 4 cái không phải `shopify` với ghi chú "Not in
-> this build yet", và `pickAdapter()` từ chối `"auto"` bằng một lỗi rõ ràng
-> nếu có ai cố gửi thẳng — với một adapter, một bộ nhận diện chỉ có thể trả
-> lời "shopify", và một câu trả lời tự động thực ra là một hằng số đội lốt.
-> Thứ hai: trường **Transport không xuất hiện trên form** — không phải bị
-> khoá kèm lý do như câu trên định. `browser` chưa được xây ở kế hoạch này
-> (§12), nên `CrawlForm` luôn gửi `transport: "server"`, và route
-> `POST /api/crawl` từ chối bất kỳ giá trị khác ngay lúc tạo run — đúng tinh
-> thần "fail ngay, không xếp hàng rồi treo" của §12.10, chỉ khác là lý do
-> không phải "chưa có thiết bị nào online" mà là transport đó chưa tồn tại.
+> **Sửa so với bản đầu — kế hoạch 1, đã cũ.** (Giữ lại vì đây là chỗ ghi rằng
+> nó từng đúng.) Ở kế hoạch 1, không có tuỳ chọn `auto`: chỉ một adapter thì
+> một bộ nhận diện chỉ có thể trả lời "shopify", và một câu trả lời tự động
+> thực ra là một hằng số đội lốt; form khoá 4/5 tên không phải `shopify`.
+>
+> **Kế hoạch 2 — bản đang chạy — xây `auto`.** `CRAWL_PLATFORMS`
+> (`lib/crawl-options.ts`) vẫn liệt cả 5 tên như thiết kế, và giờ `auto` là
+> **giá trị mặc định** của form (`DEFAULT_CRAWL_OPTIONS.platform`), không còn
+> bị khoá: `detectPlatform()` chấm điểm cả bốn adapter đã ship trên một
+> request trang chủ (chi tiết ở khối sửa của §4). Bullet **"WooCommerce v3
+> key/secret"** ở trên không có trên form và không có trong schema
+> (`crawlOptionsSchema`): Store API không cần nó, nên trường này chưa từng
+> được xây — không phải bị khoá, mà không tồn tại, đúng kiểu `Transport` bên
+> dưới.
+>
+> Trường **Transport vẫn không xuất hiện trên form** — không phải bị khoá kèm
+> lý do như thiết kế định. `browser` vẫn chưa được xây (§12, kế hoạch 3), nên
+> `CrawlForm` luôn gửi `transport: "server"`, và route `POST /api/crawl` từ
+> chối bất kỳ giá trị khác ngay lúc tạo run — đúng tinh thần "fail ngay,
+> không xếp hàng rồi treo" của §12.10, chỉ khác là lý do không phải "chưa có
+> thiết bị nào online" mà là transport đó chưa tồn tại. Duy nhất `etsy` còn bị
+> khoá trên form, với ghi chú "Needs the browser crawler".
 
 Bấm Start → tạo job `kind: "crawl"` → chuyển sang `/process/[id]`.
 

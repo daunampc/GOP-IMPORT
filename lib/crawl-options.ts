@@ -31,11 +31,12 @@ export const CRAWL_TRANSPORTS = ["server", "browser"] as const;
 export const crawlOptionsSchema = z.object({
   shopUrl: z.string().trim().url("That is not a web address."),
 
-  /*
-   * No "auto" yet. With one adapter, a detector could only answer "shopify", and
-   * an automatic answer that is really a constant is worse than a question.
+  /**
+   * `auto` reads the home page and scores every adapter against it. Named
+   * platforms skip that request entirely, which is why the form still offers
+   * them: an operator who knows what the shop runs should not pay for a guess.
    */
-  platform: z.enum(CRAWL_PLATFORMS).default("shopify"),
+  platform: z.enum([...CRAWL_PLATFORMS, "auto"]).default("auto"),
 
   transport: z.enum(CRAWL_TRANSPORTS).default("server"),
 
@@ -70,7 +71,7 @@ export const crawlOptionsSchema = z.object({
 export type CrawlOptions = z.infer<typeof crawlOptionsSchema>;
 
 export const DEFAULT_CRAWL_OPTIONS: Omit<CrawlOptions, "shopUrl"> = {
-  platform: "shopify",
+  platform: "auto",
   transport: "server",
   limit: 500,
   imagesPerProduct: 10,
@@ -80,23 +81,4 @@ export const DEFAULT_CRAWL_OPTIONS: Omit<CrawlOptions, "shopUrl"> = {
   batchSize: 50,
 };
 
-/**
- * Decimals in a currency. Wrong by one is a price wrong by ten.
- *
- * Only the zero-decimal currencies need naming; everything else is two. The
- * three-decimal currencies (KWD, BHD, OMR) are listed because a Shopify store
- * quoting them would otherwise be read as a hundredth of its real price.
- */
-const ZERO_DECIMAL = new Set(["VND", "JPY", "KRW", "CLP", "ISK", "PYG", "RWF", "UGX", "VUV", "XAF", "XOF", "XPF"]);
-const THREE_DECIMAL = new Set(["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"]);
-
-export function minorUnitFor(currency: string): number {
-  const code = currency.trim().toUpperCase();
-  if (ZERO_DECIMAL.has(code)) {
-    return 0;
-  }
-  if (THREE_DECIMAL.has(code)) {
-    return 3;
-  }
-  return 2;
-}
+export { minorUnitFor } from "./sources/crawl/money";

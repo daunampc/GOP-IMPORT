@@ -18,6 +18,8 @@ export interface CrawlResponse {
   status: number;
   contentType: string;
   body: string;
+  /** Lower-cased header names, so an adapter can score on `x-shopify-stage`. */
+  headers: Record<string, string>;
 }
 
 /**
@@ -49,6 +51,15 @@ export interface CrawlContext {
   fxRate: number | null;
   log: (line: CrawlLogLine) => void;
   signal: AbortSignal;
+  /**
+   * May this path be fetched?
+   *
+   * For adapters that DISCOVER urls — the generic one reads a sitemap — where
+   * the paths are not known until the crawl is running and so cannot be declared
+   * up front. A disallowed url is skipped with a warning rather than failing the
+   * whole run, because a sitemap listing one blocked path is ordinary.
+   */
+  isAllowed: (pathname: string) => boolean;
 }
 
 export interface DetectInput {
@@ -59,6 +70,17 @@ export interface DetectInput {
 
 export interface CrawlAdapter {
   name: PlatformName;
+  /**
+   * The paths this adapter fetches to get started, checked against robots.txt
+   * before it is allowed to run.
+   *
+   * Declared per adapter because they have nothing in common: Shopify's entry is
+   * `/products.json`, WooCommerce's is under `/wp-json/`, Magento's is
+   * `/graphql`. Checking one adapter's path on behalf of all four asks the site
+   * a question about a request that will never be made, and fails to ask about
+   * the one that will.
+   */
+  robotsPaths: ReadonlyArray<string>;
   /** Confidence from 0 to 1. The orchestrator picks the highest. */
   detect(input: DetectInput): number;
   fetchProducts(ctx: CrawlContext): AsyncGenerator<Product>;

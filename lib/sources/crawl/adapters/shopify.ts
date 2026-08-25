@@ -9,7 +9,7 @@
  */
 
 import type { Product, ProductVariation } from "../../../gop-client";
-import { convert, fromDecimal, fromMinorUnits } from "../money";
+import { convert, fromDecimal, fromMinorUnits, lessThan } from "../money";
 import { CrawlError, type CrawlAdapter, type CrawlContext, type DetectInput } from "../types";
 
 /** Shopify's hard maximum per page. Asking for more silently returns 250. */
@@ -158,7 +158,7 @@ function prices(
 
   // A compare-at at or below the charged price is not a sale; some themes leave
   // a stale value there. Publishing it would show a "discount" of zero or less.
-  if (Number(original) <= Number(charged)) {
+  if (!lessThan(charged, original, options.minorUnit)) {
     return { regular_price: charged };
   }
 
@@ -220,6 +220,8 @@ export function toProduct(raw: ShopifyProduct, options: ShopifyMapOptions): Prod
 
 export const shopifyAdapter: CrawlAdapter = {
   name: "shopify",
+
+  robotsPaths: ["/products.json"],
 
   detect(input: DetectInput): number {
     let score = 0;
