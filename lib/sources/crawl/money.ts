@@ -134,3 +134,16 @@ export function convert(amount: string, rate: number, minorUnit: number): string
 
   return fromMinorUnits(converted, minorUnit);
 }
+
+/**
+ * Is `a` strictly less than `b`, both being decimal strings from this module?
+ *
+ * Money comparison belongs here for the same reason the arithmetic does. It is
+ * done on the integer minor units rather than on parsed floats — not because a
+ * shop price is anywhere near the edge of what a double holds, but because the
+ * one place that is allowed to turn money into a number should be the one place
+ * that knows how many decimals it has.
+ */
+export function lessThan(a: string, b: string, minorUnit: number): boolean {
+  return fromDecimal(a, minorUnit) < fromDecimal(b, minorUnit);
+}

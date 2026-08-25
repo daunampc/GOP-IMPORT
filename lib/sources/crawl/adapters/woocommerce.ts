@@ -10,7 +10,7 @@
  */
 
 import type { Product, ProductVariation } from "../../../gop-client";
-import { convert, fromMinorUnits } from "../money";
+import { convert, fromMinorUnits, lessThan } from "../money";
 import { CrawlError, type CrawlAdapter, type CrawlContext, type DetectInput } from "../types";
 
 /** The Store API's own maximum. Asking for more silently returns 100. */
@@ -90,7 +90,7 @@ function priceFields(
   const regular = price(prices.regular_price, prices, options);
   const sale = price(prices.sale_price, prices, options);
 
-  return Number(sale) < Number(regular)
+  return lessThan(sale, regular, prices.currency_minor_unit)
     ? { regular_price: regular, sale_price: sale }
     : { regular_price: regular };
 }

@@ -15,7 +15,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { CrawlMoneyError, convert, fromDecimal, fromMinorUnits } from "../lib/sources/crawl/money";
+import {
+  CrawlMoneyError,
+  convert,
+  fromDecimal,
+  fromMinorUnits,
+  lessThan,
+} from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
 import { toProduct as wooToProduct, type WooProduct } from "../lib/sources/crawl/adapters/woocommerce";
@@ -139,6 +145,10 @@ function moneyTests(): void {
 
   // Round trip, since the two functions have to agree.
   check("round trip", fromMinorUnits(fromDecimal("64.00", 2), 2) === "64.00");
+
+  check("lessThan, ordinary comparison", lessThan("49.00", "59.00", 2) === true);
+  // A sale price equal to the regular price is not a sale.
+  check("lessThan, equal values is false", lessThan("59.00", "59.00", 2) === false);
 }
 
 function robotsTests(): void {
@@ -735,6 +745,187 @@ async function orchestratorTests(): Promise<void> {
   );
 }
 
+async function wooOrchestratorTests(): Promise<void> {
+  console.log("\nWooCommerce orchestrator");
+
+  interface WooScript {
+    /** Fixed status to return for every products-list request, overriding `pages`. */
+    productsStatus?: number;
+    /** Per-page product arrays; index 0 is page 1. Missing/exhausted pages answer `[]`. */
+    pages?: WooProduct[][];
+    /** Per-variation-id overrides. A ready-to-serve variation is looked up by id otherwise. */
+    variations?: Record<number, { status: number; body?: string }>;
+  }
+
+  const knownVariations: Record<number, WooProduct> = {};
+
+  /** A transport that answers Store API requests from a script and records what was asked for. */
+  function fakeWooTransport(script: WooScript) {
+    const asked: string[] = [];
+    const pages = script.pages ?? [];
+
+    return {
+      asked,
+      transport: {
+        async fetchText(url: string) {
+          asked.push(url);
+          const parsed = new URL(url);
+
+          if (parsed.pathname === "/robots.txt") {
+            return { status: 200, contentType: "text/plain", body: "" };
+          }
+
+          if (parsed.pathname === "/wp-json/wc/store/v1/products") {
+            if (script.productsStatus !== undefined) {
+              return { status: script.productsStatus, contentType: "application/json", body: "" };
+            }
+            const page = Number(parsed.searchParams.get("page") ?? "1");
+            return {
+              status: 200,
+              contentType: "application/json",
+              body: JSON.stringify(pages[page - 1] ?? []),
+            };
+          }
+
+          const variationMatch = /\/wp-json\/wc\/store\/v1\/products\/(\d+)$/.exec(parsed.pathname);
+          if (variationMatch !== null) {
+            const id = Number(variationMatch[1]);
+            const override = script.variations?.[id];
+            if (override !== undefined) {
+              return {
+                status: override.status,
+                contentType: "application/json",
+                body: override.body ?? "",
+              };
+            }
+            const known = knownVariations[id];
+            if (known !== undefined) {
+              return { status: 200, contentType: "application/json", body: JSON.stringify(known) };
+            }
+            return { status: 404, contentType: "application/json", body: "" };
+          }
+
+          return { status: 404, contentType: "text/plain", body: "not found" };
+        },
+      },
+    };
+  }
+
+  const wooProducts = JSON.parse(fixture("woo-store-api.json")) as WooProduct[];
+  const tote = wooProducts[0];
+  const linenShirt = wooProducts[1];
+
+  const variation45 = JSON.parse(fixture("woo-variation.json")) as WooProduct;
+  const variation46: WooProduct = {
+    ...variation45,
+    id: 46,
+    name: "Linen Shirt - M",
+    sku: "SHIRT-M",
+    // `attributes` on a variation record is actually `{ name, value }[]`, not the
+    // product-level `{ name, terms }[]` shape `WooProduct` declares — the same
+    // mismatch `variationOf` in the adapter itself casts through.
+    attributes: [{ name: "Size", value: "M" }] as unknown as WooProduct["attributes"],
+  };
+  knownVariations[45] = variation45;
+  knownVariations[46] = variation46;
+
+  const baseInput = {
+    shopUrl: "https://shop.example",
+    platform: "woocommerce" as const,
+    imagesPerProduct: 10,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+  };
+
+  // 1. A successful two-page crawl: page 1 has both products, page 2 is empty.
+  const twoPage = fakeWooTransport({ pages: [[tote, linenShirt], []] });
+  const outcome = await crawlShop({ ...baseInput, limit: 100, transport: twoPage.transport });
+
+  check(
+    "products come back mapped",
+    outcome.products.map((product) => product.slug).sort().join(",") === "cotton-tote,linen-shirt",
+    JSON.stringify(outcome.products.map((product) => product.slug)),
+  );
+
+  /*
+   * Asserted on the recorded requests, not the product count: a crawl that kept
+   * paging past the empty page would still yield 2 products, since nothing
+   * would be there to add to them.
+   */
+  check(
+    "paging stopped on the empty page",
+    twoPage.asked.length === 5 &&
+      twoPage.asked[1].includes("page=1") &&
+      twoPage.asked[4].includes("page=2"),
+    JSON.stringify(twoPage.asked),
+  );
+
+  // 3. One request per variation.
+  check(
+    "one variation request per variation",
+    twoPage.asked.some((url) => /\/wp-json\/wc\/store\/v1\/products\/45$/.test(new URL(url).pathname)),
+    JSON.stringify(twoPage.asked),
+  );
+
+  // 2. ctx.limit stops mid-page: two simple products on one page, limit 1.
+  const secondTote: WooProduct = { ...tote, id: 22, slug: "cotton-tote-b", name: "Cotton Tote B" };
+  const limited = fakeWooTransport({ pages: [[tote, secondTote]] });
+  const cappedOutcome = await crawlShop({ ...baseInput, limit: 1, transport: limited.transport });
+  check("ctx.limit stops mid-page", cappedOutcome.products.length === 1, String(cappedOutcome.products.length));
+
+  // 4. A variation that 404s is skipped; the product still publishes.
+  const partialFail = fakeWooTransport({
+    pages: [[linenShirt], []],
+    variations: { 46: { status: 404 } },
+  });
+  const partialOutcome = await crawlShop({ ...baseInput, limit: 100, transport: partialFail.transport });
+  const partialShirt = partialOutcome.products.find((product) => product.slug === "linen-shirt");
+  check("the product still publishes despite a failed variation", partialShirt !== undefined);
+  check(
+    "the failed variation is skipped, one fewer than the raw count",
+    (partialShirt?.variations ?? []).length === 1,
+    JSON.stringify(partialShirt?.variations),
+  );
+
+  // 5. Every variation failing degrades the product to simple, at the parent's price.
+  const allFail = fakeWooTransport({
+    pages: [[linenShirt], []],
+    variations: { 45: { status: 404 }, 46: { status: 404 } },
+  });
+  const degradedOutcome = await crawlShop({ ...baseInput, limit: 100, transport: allFail.transport });
+  const degraded = degradedOutcome.products.find((product) => product.slug === "linen-shirt");
+  check("every variation failing degrades the product to simple", degraded?.type === "simple", String(degraded?.type));
+  /*
+   * "59.00" is not invented: it comes straight from `linenShirt.prices.regular_price`
+   * ("5900", the fixture's own Store API answer for the PARENT product), read through
+   * the same `variations.length === 0` branch in `toProduct` that a genuinely simple
+   * product goes through. Nothing here fabricates a price for a variable product that
+   * lost all its variations — the parent's own price is real API data.
+   */
+  check(
+    "the degraded price is the parent's own, not invented",
+    degraded?.regular_price === "59.00",
+    String(degraded?.regular_price),
+  );
+
+  // 6. Distinguish a 404 on the products endpoint from any other status.
+  const productsOff = fakeWooTransport({ productsStatus: 404 });
+  await refusesAsync(
+    "a 404 on the products endpoint says the Store API is off",
+    () => crawlShop({ ...baseInput, limit: 100, transport: productsOff.transport }),
+    /Store API.*turned off/i,
+  );
+
+  const productsBroken = fakeWooTransport({ productsStatus: 500 });
+  await refusesAsync(
+    "any other status gives the generic message",
+    () => crawlShop({ ...baseInput, limit: 100, transport: productsBroken.transport }),
+    /Store API answered 500/i,
+  );
+}
+
 async function main(): Promise<void> {
   moneyTests();
   robotsTests();
@@ -742,6 +933,7 @@ async function main(): Promise<void> {
   wooTests();
   await transportTests();
   await orchestratorTests();
+  await wooOrchestratorTests();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {
