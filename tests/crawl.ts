@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { CrawlMoneyError, convert, fromDecimal, fromMinorUnits } from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
+import { serverTransport } from "../lib/sources/crawl/transport";
 
 let passed = 0;
 let failed = 0;
@@ -36,6 +37,21 @@ function check(name: string, condition: boolean, detail = ""): void {
 function refuses(name: string, body: () => unknown, expect: RegExp): void {
   try {
     body();
+    check(name, false, "it did not refuse at all");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    check(name, expect.test(message), `refused, but with: ${message}`);
+  }
+}
+
+/** The async twin of `refuses`. */
+async function refusesAsync(
+  name: string,
+  body: () => Promise<unknown>,
+  expect: RegExp,
+): Promise<void> {
+  try {
+    await body();
     check(name, false, "it did not refuse at all");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -223,10 +239,44 @@ function shopifyTests(): void {
   check("fx applies to the price", converted.regular_price === "457200.00", String(converted.regular_price));
 }
 
+async function transportTests(): Promise<void> {
+  console.log("\nTransport");
+
+  const transport = serverTransport({ signal: new AbortController().signal, delayMs: 0 });
+
+  /*
+   * The SSRF guard, live. This is the assertion that must never be softened: the
+   * crawler follows links out of a stranger's HTML, so "make the server fetch
+   * this" is the whole attack, and 169.254.169.254 is the cloud metadata endpoint
+   * that makes it worth doing.
+   */
+  await refusesAsync(
+    "a loopback address",
+    () => transport.fetchText("http://127.0.0.1:3000/products.json"),
+    /private|loopback|refuse|not fetch/i,
+  );
+  await refusesAsync(
+    "the cloud metadata endpoint",
+    () => transport.fetchText("http://169.254.169.254/latest/meta-data/"),
+    /private|link-local|refuse|not fetch/i,
+  );
+  await refusesAsync(
+    "a private range",
+    () => transport.fetchText("http://10.0.0.5/products.json"),
+    /private|refuse|not fetch/i,
+  );
+  await refusesAsync(
+    "a non-http scheme",
+    () => transport.fetchText("file:///etc/passwd"),
+    /http|scheme|refuse|not fetch/i,
+  );
+}
+
 async function main(): Promise<void> {
   moneyTests();
   robotsTests();
   shopifyTests();
+  await transportTests();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {
