@@ -104,8 +104,13 @@ export function CrawlForm() {
             </Field>
 
             <Field label="Platform" hint="Only Shopify is readable in this build.">
+              {/*
+               * No `label` here: `Field` already renders the visible "Platform"
+               * label, and `Segmented` turns its own `label` prop into an
+               * `aria-label` on the radiogroup — passing both would have a
+               * screen reader announce "Platform" twice.
+               */}
               <Segmented
-                label="Platform"
                 value={platform}
                 onChange={setPlatform}
                 options={CRAWL_PLATFORMS.map((name) => ({

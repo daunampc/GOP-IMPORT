@@ -95,34 +95,42 @@ export function fromDecimal(value: number | string, minorUnit: number): number {
 /**
  * Multiply by an operator-entered exchange rate.
  *
- * Two decimal places out, because that is what a shop displays. The rate itself
- * is recorded on the run — see `lib/crawl-options.ts` — so the number here can
- * always be re-derived from what the operator actually typed. The multiplication
- * itself happens on an integer number of hundredths, not on the decimal amount,
- * so a half-way result is decided by a rounding rule rather than by a binary
- * floating-point artefact.
+ * As many decimal places out as the source currency has, not a hardcoded two —
+ * `minorUnit` is the same argument `fromMinorUnits`/`fromDecimal` take, and this
+ * function is built on top of both of them rather than repeating their scaling
+ * with its own assumption baked in. Assuming two silently dropped the third
+ * digit of a three-decimal currency (KWD, BHD, OMR) before the rate was even
+ * applied — `"19.995"` came out `"20.00"`. The rate itself is recorded on the
+ * run — see `lib/crawl-options.ts` — so the number here can always be
+ * re-derived from what the operator actually typed.
  */
-export function convert(amount: string, rate: number): string {
+export function convert(amount: string, rate: number, minorUnit: number): string {
   if (!Number.isFinite(rate) || rate <= 0) {
     throw new CrawlMoneyError(`An exchange rate must be a positive number, not ${rate}.`);
   }
 
-  const value = Number(amount);
-  if (!Number.isFinite(value)) {
-    throw new CrawlMoneyError(`Not a price: ${JSON.stringify(amount)}.`);
-  }
+  /*
+   * `fromDecimal` parses the STRING rather than going through a float — the same
+   * reason it exists in the first place — and it refuses an amount that carries
+   * more precision than `minorUnit` can hold, rather than let this function
+   * round it away. `price()` in the Shopify adapter always builds `amount` from
+   * `fromMinorUnits`/`fromDecimal` at this exact `minorUnit`, so that refusal
+   * should never fire in practice — but a caller that broke that invariant gets
+   * an error, not a silently wrong price.
+   */
+  const minor = fromDecimal(amount, minorUnit);
 
   /*
-   * Scale to an integer BEFORE multiplying, so a half-way result is decided by
-   * a rounding rule rather than by a binary artefact.
+   * Multiplying on the integer minor-unit amount, not the decimal one, so a
+   * half-way result is decided by a rounding rule rather than by a binary
+   * floating-point artefact.
    *
    * 19.99 x 0.5 is 9.995, which money rounds up to 10.00. Computed as
    * `19.99 * 0.5` the double is 9.994999999999999, and `.toFixed(2)` answers
    * "9.99" — a cent lost to the representation. As `1999 * 0.5` the result is
    * 999.5 exactly, and `Math.round` takes it to 1000.
    */
-  const hundredths = Math.round(value * 100);
-  const converted = Math.round(hundredths * rate);
+  const converted = Math.round(minor * rate);
 
-  return (converted / 100).toFixed(2);
+  return fromMinorUnits(converted, minorUnit);
 }

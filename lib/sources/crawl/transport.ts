@@ -73,8 +73,17 @@ function formatByteCeiling(bytes: number): string {
   return `${bytes} bytes`;
 }
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
-  if (ms <= 0) {
+// Exported for tests/crawl.ts, so the already-aborted-signal fix can be
+// asserted directly rather than by waiting out a real retry's backoff.
+export function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  /*
+   * An abort that has ALREADY fired never fires again.
+   *
+   * By the time a Stop reaches this line the in-flight fetch has usually rejected
+   * because of that same signal, so registering a listener would wait out the
+   * whole backoff for an event that is already in the past. Checked, not awaited.
+   */
+  if (ms <= 0 || signal.aborted) {
     return Promise.resolve();
   }
 

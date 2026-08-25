@@ -18,8 +18,8 @@ import { join } from "node:path";
 import { CrawlMoneyError, convert, fromDecimal, fromMinorUnits } from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
-import { serverTransport } from "../lib/sources/crawl/transport";
-import { crawlShop } from "../lib/sources/crawl";
+import { serverTransport, sleep } from "../lib/sources/crawl/transport";
+import { crawlShop, MAX_CRAWL_DELAY_MS } from "../lib/sources/crawl";
 
 let passed = 0;
 let failed = 0;
@@ -86,9 +86,37 @@ function moneyTests(): void {
   refuses("a negative minor unit", () => fromMinorUnits(1999, -1), /minor unit/i);
   refuses("nonsense", () => fromMinorUnits("abc", 2), /whole number/i);
 
-  check("convert rounds to 2dp", convert("10.00", 25400) === "254000.00", convert("10.00", 25400));
-  check("convert keeps precision", convert("19.99", 0.5) === "10.00", convert("19.99", 0.5));
-  refuses("a zero rate", () => convert("10.00", 0), /rate/i);
+  check(
+    "convert rounds to 2dp",
+    convert("10.00", 25400, 2) === "254000.00",
+    convert("10.00", 25400, 2),
+  );
+  check(
+    "convert keeps precision",
+    convert("19.99", 0.5, 2) === "10.00",
+    convert("19.99", 0.5, 2),
+  );
+  refuses("a zero rate", () => convert("10.00", 0, 2), /rate/i);
+
+  /*
+   * The bug this exists to catch: a hardcoded x100 dropped the third digit of a
+   * three-decimal currency (KWD, BHD, OMR) before the rate was even applied.
+   */
+  check(
+    "convert preserves a 3-decimal currency at rate 1",
+    convert("19.995", 1, 3) === "19.995",
+    convert("19.995", 1, 3),
+  );
+  check(
+    "convert applies a rate to a 3-decimal currency",
+    convert("10.000", 2, 3) === "20.000",
+    convert("10.000", 2, 3),
+  );
+  refuses(
+    "convert refuses more precision than the minor unit holds",
+    () => convert("19.9999", 1, 3),
+    /decimal place/i,
+  );
 
   check("decimal to cents", fromDecimal("18.00", 2) === 1800, String(fromDecimal("18.00", 2)));
   check("one decimal place", fromDecimal("18.5", 2) === 1850, String(fromDecimal("18.5", 2)));
@@ -242,6 +270,27 @@ function shopifyTests(): void {
 
 async function transportTests(): Promise<void> {
   console.log("\nTransport");
+
+  /*
+   * The abort-already-fired fix, direct: a signal aborted BEFORE `sleep` is
+   * called must not wait for an 'abort' event that already happened. Asserted
+   * on elapsed time against a delay long enough that the old bug would have
+   * made this test itself slow.
+   */
+  {
+    const already = new AbortController();
+    already.abort();
+
+    const start = Date.now();
+    await sleep(5000, already.signal);
+    const elapsed = Date.now() - start;
+
+    check(
+      "sleep on an already-aborted signal returns promptly",
+      elapsed < 100,
+      `elapsed ${elapsed}ms, expected well under the 5000ms requested`,
+    );
+  }
 
   const transport = serverTransport({ signal: new AbortController().signal, delayMs: 0 });
 
@@ -460,9 +509,11 @@ async function orchestratorTests(): Promise<void> {
   /** A transport that answers from the fixtures and records what was asked for. */
   function fakeTransport(robots: string) {
     const asked: string[] = [];
+    const raisedTo: number[] = [];
 
     return {
       asked,
+      raisedTo,
       transport: {
         async fetchText(url: string) {
           asked.push(url);
@@ -480,6 +531,12 @@ async function orchestratorTests(): Promise<void> {
             };
           }
           return { status: 200, contentType: "text/html", body: "<html>cdn.shopify.com</html>" };
+        },
+        // Present so `crawlShop`'s `"raiseDelayTo" in transport` check finds it,
+        // and recording rather than acting on it so the delay-cap test below can
+        // prove what was asked for without any real waiting.
+        raiseDelayTo(ms: number) {
+          raisedTo.push(ms);
         },
       },
     };
@@ -550,6 +607,31 @@ async function orchestratorTests(): Promise<void> {
     "no product request was made",
     !blocked.asked.some((url) => url.includes("products.json")),
     `fetched: ${JSON.stringify(blocked.asked)}`,
+  );
+
+  /*
+   * The time-cap finding: a site can ask for a `Crawl-delay` of any size, and
+   * this crawl must not adopt it wholesale — the worker has only four job slots
+   * for the whole installation, and honouring an hour-long delay would hold one
+   * of them hostage for every other account. Asserted through the injected
+   * transport's `raiseDelayTo` spy, so nothing here actually sleeps.
+   */
+  const huge = fakeTransport("User-agent: *\nCrawl-delay: 999999");
+  await crawlShop({
+    shopUrl: "https://example.myshopify.com",
+    platform: "shopify",
+    limit: 100,
+    imagesPerProduct: 10,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: huge.transport,
+  });
+  check(
+    "an extreme Crawl-delay is capped, not adopted",
+    huge.raisedTo.length === 1 && huge.raisedTo[0] === MAX_CRAWL_DELAY_MS,
+    `raiseDelayTo was called with: ${JSON.stringify(huge.raisedTo)}`,
   );
 }
 

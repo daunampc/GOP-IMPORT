@@ -14,7 +14,7 @@ import type { ImportOptions } from "./import-options";
 import type { PurgeItem } from "./purge-options";
 import type { PurgeOptions } from "./purge-options";
 import type { EditItem, EditOptions } from "./edit-options";
-import { type CrawlOptions } from "./crawl-options";
+import type { CrawlOptions } from "./crawl-options";
 import { STOP_CHANNEL, createConnection, redis } from "./redis";
 import { MAX_BATCH_SIZE, type ImportResult, type Product } from "./gop-client";
 

@@ -112,7 +112,7 @@ function price(value: string, options: ShopifyMapOptions): string {
    */
   const decimal = fromMinorUnits(fromDecimal(value, options.minorUnit), options.minorUnit);
 
-  return options.fxRate === null ? decimal : convert(decimal, options.fxRate);
+  return options.fxRate === null ? decimal : convert(decimal, options.fxRate, options.minorUnit);
 }
 
 function variationOf(

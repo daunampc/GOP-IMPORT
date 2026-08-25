@@ -199,11 +199,14 @@ export function JobDetailView({
    * relabel a history somebody already read. Display only — it changed nothing on
    * any site.
    */
-  const currency = purge
-    ? ""
-    : edit
-      ? ((job.options as EditOptions).displayCurrency ?? "")
-      : ((job.options as ImportOptions).displayCurrency ?? "");
+  const currency = crawl
+    ? // A crawl publishes nothing, so it has no display currency to show.
+      ""
+    : purge
+      ? ""
+      : edit
+        ? ((job.options as EditOptions).displayCurrency ?? "")
+        : ((job.options as ImportOptions).displayCurrency ?? "");
 
   /**
    * Apply freshly read results to state.
