@@ -12,6 +12,7 @@ import type { Product } from "../../gop-client";
 import { shopifyAdapter } from "./adapters/shopify";
 import { wooAdapter } from "./adapters/woocommerce";
 import { magentoAdapter } from "./adapters/magento";
+import { genericAdapter } from "./adapters/generic";
 import { CRAWLER_USER_AGENT, parseRobots } from "./robots";
 import { serverTransport, type ServerTransport } from "./transport";
 import {
@@ -29,7 +30,12 @@ import {
  * answer "shopify" would be a lie told by a lookup table, so `pickAdapter`
  * refuses a store it cannot serve rather than guessing.
  */
-const ADAPTERS: ReadonlyArray<CrawlAdapter> = [shopifyAdapter, wooAdapter, magentoAdapter];
+const ADAPTERS: ReadonlyArray<CrawlAdapter> = [
+  shopifyAdapter,
+  wooAdapter,
+  magentoAdapter,
+  genericAdapter,
+];
 
 /** How long to leave between two requests to the same host, unless robots says more. */
 const DEFAULT_DELAY_MS = 300;

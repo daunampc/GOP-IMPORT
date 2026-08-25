@@ -26,6 +26,8 @@ import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
 import { toProduct as wooToProduct, type WooProduct } from "../lib/sources/crawl/adapters/woocommerce";
 import { toProduct as magentoToProduct, type MagentoItem } from "../lib/sources/crawl/adapters/magento";
+import { jsonLdBlocks, metaContent, sitemapUrls } from "../lib/sources/crawl/html";
+import { productFromJsonLd, productFromMeta } from "../lib/sources/crawl/adapters/generic";
 import { serverTransport, sleep } from "../lib/sources/crawl/transport";
 import { crawlShop, MAX_CRAWL_DELAY_MS } from "../lib/sources/crawl";
 
@@ -971,12 +973,63 @@ function magentoTests(): void {
   check("fx applied", converted.regular_price === "609600.00", String(converted.regular_price));
 }
 
+function genericTests(): void {
+  console.log("\nGeneric (schema.org)");
+
+  const productHtml = fixture("jsonld-product.html");
+  const blocks = jsonLdBlocks(productHtml);
+  check("one json-ld block", blocks.length === 1, String(blocks.length));
+
+  const opts = { imagesPerProduct: 10, fxRate: null };
+  const scarf = productFromJsonLd(blocks[0], opts);
+
+  check("found the Product inside @graph", scarf !== null);
+  check("name", scarf?.name === "Wool Scarf", String(scarf?.name));
+  check("sku", scarf?.sku === "SCARF-9", String(scarf?.sku));
+  check("description", scarf?.description === "Warm.", String(scarf?.description));
+  check("price from offers", scarf?.regular_price === "42.00", String(scarf?.regular_price));
+  check("in stock from availability", scarf?.instock === true);
+  check("brand kept as meta", scarf?.custom_meta?.brand === "Northbound");
+  check(
+    "images",
+    JSON.stringify(scarf?.images) ===
+      '["https://shop.example/scarf-1.jpg","https://shop.example/scarf-2.jpg"]',
+    JSON.stringify(scarf?.images),
+  );
+
+  // A block with no Product at all must answer null, not throw.
+  check("no Product means null", productFromJsonLd({ "@type": "WebSite" }, opts) === null);
+
+  const ogHtml = fixture("og-product.html");
+  check("meta by property", metaContent(ogHtml, "og:title") === "Canvas Belt");
+  check("missing meta is null", metaContent(ogHtml, "og:description") === null);
+
+  const belt = productFromMeta(ogHtml, "https://shop.example/belt", opts);
+  check("og name", belt?.name === "Canvas Belt", String(belt?.name));
+  check("og price", belt?.regular_price === "18.50", String(belt?.regular_price));
+  check("og image", JSON.stringify(belt?.images) === '["https://shop.example/belt.jpg"]');
+
+  // Without a price there is nothing worth importing.
+  check(
+    "no price means null",
+    productFromMeta('<meta property="og:title" content="X" />', "https://x.example/x", opts) === null,
+  );
+
+  check(
+    "sitemap index urls",
+    JSON.stringify(sitemapUrls(fixture("sitemap-index.xml"))) ===
+      '["https://shop.example/sitemap-products.xml"]',
+  );
+  check("sitemap product urls", sitemapUrls(fixture("sitemap-products.xml")).length === 3);
+}
+
 async function main(): Promise<void> {
   moneyTests();
   robotsTests();
   shopifyTests();
   wooTests();
   magentoTests();
+  genericTests();
   await transportTests();
   await orchestratorTests();
   await wooOrchestratorTests();
