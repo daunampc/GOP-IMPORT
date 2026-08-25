@@ -1,6 +1,7 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import Link from "next/link";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { StoreHealthPill } from "@/components/domain/store-health";
@@ -115,6 +116,14 @@ export function ImportWizard({
 
   const [storeIds, setStoreIds] = useState<string[]>([]);
   const [file, setFile] = useState<File | null>(null);
+
+  /*
+   * A crawl already staged its products, so step 1 has nothing to read and no
+   * columns to map. The id travels to the preview endpoint in place of the file;
+   * `fromCrawl` in lib/build-products.ts is what reads it back.
+   */
+  const searchParams = useSearchParams();
+  const crawlJobId = searchParams.get("crawl");
 
   /**
    * The chosen format, or `"auto"` to let the server decide from the columns.
@@ -366,21 +375,28 @@ export function ImportWizard({
     setPreviewError(null);
 
     try {
-      if (!file) {
-        setPreviewError("No CSV file chosen.");
-        return;
-      }
-
       const form = new FormData();
       form.set("options", JSON.stringify({ ...options, storeId: storeIds[0] ?? "" }));
-      form.set("file", file);
-      // Only send it when the operator chose one. Sending "auto" — or worse, a
-      // default — is what stopped detection from ever running.
-      if (dialect !== "auto") {
-        form.set("dialect", dialect);
-      }
-      if (Object.keys(columnMap).length > 0) {
-        form.set("columnMap", JSON.stringify(columnMap));
+
+      if (crawlJobId !== null) {
+        // A crawl carries no dialect, columns or column map — those are CSV
+        // facts. `fromCrawl` on the server reads the staged products by id.
+        form.set("crawlJobId", crawlJobId);
+      } else {
+        if (!file) {
+          setPreviewError("No CSV file chosen.");
+          return;
+        }
+
+        form.set("file", file);
+        // Only send it when the operator chose one. Sending "auto" — or worse, a
+        // default — is what stopped detection from ever running.
+        if (dialect !== "auto") {
+          form.set("dialect", dialect);
+        }
+        if (Object.keys(columnMap).length > 0) {
+          form.set("columnMap", JSON.stringify(columnMap));
+        }
       }
 
       const response = await fetch("/api/import/preview", { method: "POST", body: form });
@@ -429,7 +445,7 @@ export function ImportWizard({
     } finally {
       setPreviewing(false);
     }
-  }, [options, storeIds, file, dialect, columnMap, rememberMap]);
+  }, [options, storeIds, file, crawlJobId, dialect, columnMap, rememberMap]);
 
   // ------------------------------------------------------------------ Run
   /**
@@ -599,7 +615,9 @@ export function ImportWizard({
   }
 
   // -------------------------------------------------------- Step readiness
-  const sourceReady = file !== null;
+  // A crawl already staged its products — no file is ever chosen for it — so
+  // this has to be true for either kind of source, not just a picked file.
+  const sourceReady = file !== null || crawlJobId !== null;
   const storesReady = storeIds.length > 0;
 
   const canGo: Record<StepKey, boolean> = {
@@ -638,6 +656,7 @@ export function ImportWizard({
 
       {step === "source" ? (
         <SourceStep
+          crawlJobId={crawlJobId}
           file={file}
           onFile={(next) => {
             setFile(next);
@@ -912,6 +931,7 @@ function StepBar({
 /* ========================================================================== */
 
 function SourceStep({
+  crawlJobId,
   file,
   onFile,
   columns,
@@ -928,6 +948,8 @@ function SourceStep({
   onNext,
   canNext,
 }: {
+  /** Set once a crawl's products are the source — nothing here reads a file. */
+  crawlJobId: string | null;
   file: File | null;
   onFile: (file: File | null) => void;
   columns: string[];
@@ -950,44 +972,68 @@ function SourceStep({
       <Panel
         title="Source file"
         icon="file"
-        description="A product export in CSV form — Shopify, Shopbase or WooCommerce"
+        description={
+          crawlJobId !== null
+            ? "Already read by a crawl — nothing to choose here"
+            : "A product export in CSV form — Shopify, Shopbase or WooCommerce"
+        }
       >
         <div className="space-y-4">
-          <FileDropzone file={file} onFile={onFile} hint="Drop a CSV here, or click to choose one" />
-
-          {/*
-            The format is chosen HERE, at step one, with the detected answer already
-            selected. It used to be decided invisibly and wrongly: the wizard always
-            claimed Shopify, so the only way to correct it was to run a preview, watch
-            it fail, and come back — which is precisely the loop this replaces.
-          */}
-          {file !== null ? (
-            <div className="space-y-3 border-t border-line pt-4">
-              <FormatChooser
-                dialect={dialect}
-                onDialect={onDialect}
-                detected={detected}
-                columns={columns}
+          {crawlJobId !== null ? (
+            // A crawl staged its own products; there is no file to drop and no
+            // columns to map, so the ordinary controls are replaced rather than
+            // merely disabled.
+            <Card>
+              <CardBody className="flex flex-wrap items-center justify-between gap-3">
+                <p className="text-sm text-ink">Importing the products from a crawl.</p>
+                <Link href="/crawl" className="text-sm text-accent-fg hover:underline">
+                  Crawl a different shop
+                </Link>
+              </CardBody>
+            </Card>
+          ) : (
+            <>
+              <FileDropzone
+                file={file}
+                onFile={onFile}
+                hint="Drop a CSV here, or click to choose one"
               />
 
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-xs text-ink-subtle">
-                  {columns.length > 0
-                    ? `${columns.length} column(s) read from the file's first line.`
-                    : "Reading the file's first line…"}
-                </p>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  icon="link"
-                  disabled={columns.length === 0}
-                  onClick={() => onShowMapper(!showMapper)}
-                >
-                  {showMapper ? "Hide the column mapper" : "Map columns"}
-                </Button>
-              </div>
-            </div>
-          ) : null}
+              {/*
+                The format is chosen HERE, at step one, with the detected answer already
+                selected. It used to be decided invisibly and wrongly: the wizard always
+                claimed Shopify, so the only way to correct it was to run a preview, watch
+                it fail, and come back — which is precisely the loop this replaces.
+              */}
+              {file !== null ? (
+                <div className="space-y-3 border-t border-line pt-4">
+                  <FormatChooser
+                    dialect={dialect}
+                    onDialect={onDialect}
+                    detected={detected}
+                    columns={columns}
+                  />
+
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-ink-subtle">
+                      {columns.length > 0
+                        ? `${columns.length} column(s) read from the file's first line.`
+                        : "Reading the file's first line…"}
+                    </p>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      icon="link"
+                      disabled={columns.length === 0}
+                      onClick={() => onShowMapper(!showMapper)}
+                    >
+                      {showMapper ? "Hide the column mapper" : "Map columns"}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+            </>
+          )}
         </div>
       </Panel>
 

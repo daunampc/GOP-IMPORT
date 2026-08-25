@@ -183,6 +183,15 @@ export function JobDetailView({
   const edit = job.kind === "update";
 
   /**
+   * A crawl READ a shop; it never wrote to one.
+   *
+   * Every panel below this point assumes a target site, per-row results and
+   * batches — none of which a crawl has — so it gets its own section instead of
+   * a third arm threaded through those. See the crawl branch in the JSX below.
+   */
+  const crawl = job.kind === "crawl";
+
+  /**
    * The currency this run was REVIEWED under, stored on the run itself.
    *
    * Read from the run rather than from the account's current setting, for the same
@@ -793,281 +802,113 @@ export function JobDetailView({
         </Alert>
       ) : null}
 
-      {store === null ? (
-        <Alert tone="warn" title="This run's site has been removed">
-          The results are still readable, but there is no site to link products to, and failures
-          cannot be resent until the site is added again.
-        </Alert>
-      ) : null}
+      {/*
+        Everything from here to the failed-products card assumes a target site,
+        batches and per-row results — none of which a crawl has, since it only
+        READS a shop rather than writing to one. One branch here rather than
+        `crawl` threaded through each panel's conditions below.
+      */}
+      {crawl ? (
+        <CrawlSummary job={job} />
+      ) : (
+        <>
+          {store === null ? (
+            <Alert tone="warn" title="This run's site has been removed">
+              The results are still readable, but there is no site to link products to, and failures
+              cannot be resent until the site is added again.
+            </Alert>
+          ) : null}
 
-      {/* -------------------------------------------------------------- Progress */}
-      <Panel title="Progress" icon="gauge">
-        <div className="space-y-4">
-          <ProgressBar
-            value={job.processed}
-            max={job.total}
-            size="lg"
-            tone={job.failed > 0 ? "warn" : job.status === "completed" ? "ok" : "accent"}
-            label="Overall progress"
-            indeterminate={job.status === "queued"}
-          />
-
-          <StackedBar
-            total={job.total}
-            size="md"
-            segments={[
-              { value: job.succeeded - job.deduplicated, tone: "ok", label: "Created" },
-              {
-                value: job.deduplicated,
-                tone: "info",
-                label: edit ? "Already correct" : "Already present",
-              },
-              { value: job.failed, tone: "bad", label: "Failed" },
-            ]}
-          />
-
-          <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-            <Stat
-              label="Processed"
-              value={`${formatNumber(job.processed)}/${formatNumber(job.total)}`}
-              icon="package"
-              hint={`${jobPercent(job)}% · batch ${job.batchesDone}/${job.batches}`}
-            />
-            {/*
-              "Created" is a lie on a run that created nothing.
-              A bulk edit changes products that were already there, and a removal
-              takes them away — printing "Created 2 · products genuinely created"
-              over either is how somebody concludes the tool did the wrong thing.
-              The three kinds get three words.
-            */}
-            <Stat
-              label={edit ? "Changed" : purge ? "Removed" : "Created"}
-              value={formatNumber(job.succeeded - job.deduplicated)}
-              tone="ok"
-              icon={edit ? "refresh" : purge ? "trash" : "check-circle"}
-              hint={
-                edit
-                  ? job.deduplicated > 0
-                    ? `${formatNumber(job.deduplicated)} were already exactly as asked, so nothing was written`
-                    : "products changed in place, keeping their ids"
-                  : job.deduplicated > 0
-                    ? `${formatNumber(job.deduplicated)} row(s) already present, nothing recreated`
-                    : purge
-                      ? "products taken off the site"
-                      : "products genuinely created"
-              }
-            />
-            <Stat
-              label="Failed"
-              value={formatNumber(job.failed)}
-              tone={job.failed > 0 ? "bad" : "neutral"}
-              icon="alert-circle"
-              hint={formatPercent(job.processed > 0 ? job.failed / job.processed : null)}
-            />
-            <Stat
-              label="Speed"
-              value={formatThroughput(perSecond)}
-              icon="zap"
-              hint={
-                elapsed === null
-                  ? "not started"
-                  : `${formatDuration(elapsed)} wall clock`
-              }
-            />
-          </div>
-        </div>
-      </Panel>
-
-      {/* ------------------------------------------------------------- Per batch */}
-      <div className="grid gap-5 xl:grid-cols-[2fr_1fr]">
-        <Panel
-          title="Speed batch by batch"
-          icon="activity"
-          description={`${batches.length} batch(es) done · elapsed_ms comes from the plugin itself`}
-        >
-          {batches.length === 0 ? (
-            <EmptyState
-              icon="activity"
-              title="No batch has finished yet"
-              description="Batch figures appear the moment the plugin answers the first one."
-              action={
-                <ButtonLink href="/process" variant="secondary" icon="arrow-left">
-                  Back to activity
-                </ButtonLink>
-              }
-            />
-          ) : (
+          {/* -------------------------------------------------------------- Progress */}
+          <Panel title="Progress" icon="gauge">
             <div className="space-y-4">
-              <Sparkline
-                values={batchSpeeds}
-                label={`Speed per batch, from ${batchSpeeds[0]?.toFixed(1) ?? 0} to ${batchSpeeds[batchSpeeds.length - 1]?.toFixed(1) ?? 0} products per second`}
-                height={64}
-                tone="accent"
+              <ProgressBar
+                value={job.processed}
+                max={job.total}
+                size="lg"
+                tone={job.failed > 0 ? "warn" : job.status === "completed" ? "ok" : "accent"}
+                label="Overall progress"
+                indeterminate={job.status === "queued"}
               />
 
-              <div className="scroll-frame max-h-72 overflow-y-auto">
-                <table className="w-full min-w-[32rem] border-collapse text-sm">
-                  <caption className="sr-only">Figures for each batch</caption>
-                  <thead className="sticky top-0 bg-surface">
-                    <tr className="border-b border-line">
-                      {["Batch", "Size", "Plugin (elapsed_ms)", "Wall clock", "Speed", "Outcome"].map(
-                        (header) => (
-                          <th
-                            key={header}
-                            scope="col"
-                            className="px-2 py-2 text-left text-2xs font-semibold tracking-wide text-ink-subtle uppercase"
-                          >
-                            {header}
-                          </th>
-                        ),
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {batches.map((batch) => (
-                      <tr key={batch.index} className="border-b border-line last:border-0">
-                        <td className="tnum px-2 py-1.5 text-xs text-ink-subtle">
-                          #{batch.index + 1}
-                        </td>
-                        <td className="tnum px-2 py-1.5 text-xs">{batch.size}</td>
-                        <td className="tnum px-2 py-1.5 text-xs">
-                          {batch.elapsedMs === null ? (
-                            <Tooltip content="The whole batch died before the plugin answered, so there is no elapsed_ms.">
-                              <span className="text-ink-subtle">—</span>
-                            </Tooltip>
-                          ) : (
-                            formatDuration(batch.elapsedMs)
-                          )}
-                        </td>
-                        <td className="tnum px-2 py-1.5 text-xs text-ink-muted">
-                          {formatDuration(batch.wallMs)}
-                        </td>
-                        <td className="tnum px-2 py-1.5 text-xs">
-                          {batch.elapsedMs && batch.elapsedMs > 0
-                            ? formatThroughput((batch.size / batch.elapsedMs) * 1000)
-                            : "—"}
-                        </td>
-                        <td className="px-2 py-1.5">
-                          <span className="flex flex-wrap gap-1">
-                            {batch.succeeded - batch.deduplicated > 0 ? (
-                              <Badge tone="ok">{batch.succeeded - batch.deduplicated}</Badge>
-                            ) : null}
-                            {batch.deduplicated > 0 ? (
-                              <Badge tone="info">{batch.deduplicated}</Badge>
-                            ) : null}
-                            {batch.failed > 0 ? <Badge tone="bad">{batch.failed}</Badge> : null}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <StackedBar
+                total={job.total}
+                size="md"
+                segments={[
+                  { value: job.succeeded - job.deduplicated, tone: "ok", label: "Created" },
+                  {
+                    value: job.deduplicated,
+                    tone: "info",
+                    label: edit ? "Already correct" : "Already present",
+                  },
+                  { value: job.failed, tone: "bad", label: "Failed" },
+                ]}
+              />
+
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <Stat
+                  label="Processed"
+                  value={`${formatNumber(job.processed)}/${formatNumber(job.total)}`}
+                  icon="package"
+                  hint={`${jobPercent(job)}% · batch ${job.batchesDone}/${job.batches}`}
+                />
+                {/*
+                  "Created" is a lie on a run that created nothing.
+                  A bulk edit changes products that were already there, and a removal
+                  takes them away — printing "Created 2 · products genuinely created"
+                  over either is how somebody concludes the tool did the wrong thing.
+                  The three kinds get three words.
+                */}
+                <Stat
+                  label={edit ? "Changed" : purge ? "Removed" : "Created"}
+                  value={formatNumber(job.succeeded - job.deduplicated)}
+                  tone="ok"
+                  icon={edit ? "refresh" : purge ? "trash" : "check-circle"}
+                  hint={
+                    edit
+                      ? job.deduplicated > 0
+                        ? `${formatNumber(job.deduplicated)} were already exactly as asked, so nothing was written`
+                        : "products changed in place, keeping their ids"
+                      : job.deduplicated > 0
+                        ? `${formatNumber(job.deduplicated)} row(s) already present, nothing recreated`
+                        : purge
+                          ? "products taken off the site"
+                          : "products genuinely created"
+                  }
+                />
+                <Stat
+                  label="Failed"
+                  value={formatNumber(job.failed)}
+                  tone={job.failed > 0 ? "bad" : "neutral"}
+                  icon="alert-circle"
+                  hint={formatPercent(job.processed > 0 ? job.failed / job.processed : null)}
+                />
+                <Stat
+                  label="Speed"
+                  value={formatThroughput(perSecond)}
+                  icon="zap"
+                  hint={
+                    elapsed === null
+                      ? "not started"
+                      : `${formatDuration(elapsed)} wall clock`
+                  }
+                />
               </div>
             </div>
-          )}
-        </Panel>
+          </Panel>
 
-        <Panel title="Options used" icon="settings">
-          <DescriptionList
-            columns={1}
-            items={[
-              ...(job.kind === "purge"
-                ? purgeOptionItems(job.options as PurgeOptions)
-                : edit
-                  ? editOptionItems(job.options as EditOptions)
-                  : importOptionItems(job.options as ImportOptions)),
-              {
-                term: "Timing",
-                value: (
-                  <>
-                    <DateTime iso={job.startedAt} /> → <DateTime iso={job.finishedAt} />
-                  </>
-                ),
-                hint:
-                  job.pluginElapsedMs > 0
-                    ? `The plugin worked ${formatDuration(job.pluginElapsedMs)} in total (summed across batches that ran in parallel)`
-                    : undefined,
-                wide: true,
-              },
-            ]}
-          />
-        </Panel>
-      </div>
-
-      {purge && results !== null ? <RemovalEvidence results={results} /> : null}
-
-      {/* --------------------------------------------------------- Per-row results */}
-      <Panel
-        title="Per-row results"
-        icon="file"
-        padded={false}
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Input
-              icon="search"
-              placeholder="Search by SKU or error code…"
-              aria-label="Search the results"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              className="h-8 w-52 text-xs"
-            />
-            <Segmented
-              label="Filter the results"
-              size="sm"
-              value={filter}
-              onChange={setFilter}
-              options={[
-                { value: "all", label: `All (${counts.all})` },
-                {
-                  value: "created",
-                  // Same reason as the headline stat: this tab must not say
-                  // "Created" over rows that changed a product already on the site.
-                  label: `${edit ? "Changed" : purge ? "Removed" : "Created"} (${counts.created})`,
-                },
-                {
-                  value: "deduplicated",
-                  label: `${edit ? "Already correct" : "Already present"} (${counts.deduplicated})`,
-                },
-                { value: "failed", label: `Failed (${counts.failed})` },
-              ]}
-            />
-          </div>
-        }
-      >
-        {resultsState === "loading" && results === null ? (
-          <SkeletonTable rows={8} columns={5} className="p-4" />
-        ) : resultsState === "error" ? (
-          <div className="p-4">
-            <ErrorState
-              title="Could not read the results"
-              message={resultsError ?? "Unknown error."}
-              hint="Results are kept for 7 days. If this run has aged out, its rows have been cleaned up."
-              onRetry={() => {
-                setResultsState("loading");
-                setResultsError(null);
-                void fetchResults(job.id).then(applyResults);
-              }}
-            />
-          </div>
-        ) : (
-          <DataTable
-            caption="Per-row results for this run"
-            rows={filtered}
-            columns={columns}
-            rowKey={(result) => String(result.index)}
-            defaultSort={{ key: "index", direction: "asc" }}
-            rowTone={(result) => (!result.ok ? "bad" : result.deduplicated ? "none" : "none")}
-            dense
-            empty={
-              counts.all === 0 ? (
+          {/* ------------------------------------------------------------- Per batch */}
+          <div className="grid gap-5 xl:grid-cols-[2fr_1fr]">
+            <Panel
+              title="Speed batch by batch"
+              icon="activity"
+              description={`${batches.length} batch(es) done · elapsed_ms comes from the plugin itself`}
+            >
+              {batches.length === 0 ? (
                 <EmptyState
-                  icon="clock"
-                  title={active ? "No row has finished yet" : "No results"}
-                  description={
-                    active
-                      ? "Results are written after EVERY batch, so they will appear here as they land."
-                      : "This run processed nothing — it was probably cancelled before its first batch."
-                  }
+                  icon="activity"
+                  title="No batch has finished yet"
+                  description="Batch figures appear the moment the plugin answers the first one."
                   action={
                     <ButtonLink href="/process" variant="secondary" icon="arrow-left">
                       Back to activity
@@ -1075,99 +916,279 @@ export function JobDetailView({
                   }
                 />
               ) : (
-                <EmptyState
+                <div className="space-y-4">
+                  <Sparkline
+                    values={batchSpeeds}
+                    label={`Speed per batch, from ${batchSpeeds[0]?.toFixed(1) ?? 0} to ${batchSpeeds[batchSpeeds.length - 1]?.toFixed(1) ?? 0} products per second`}
+                    height={64}
+                    tone="accent"
+                  />
+
+                  <div className="scroll-frame max-h-72 overflow-y-auto">
+                    <table className="w-full min-w-[32rem] border-collapse text-sm">
+                      <caption className="sr-only">Figures for each batch</caption>
+                      <thead className="sticky top-0 bg-surface">
+                        <tr className="border-b border-line">
+                          {["Batch", "Size", "Plugin (elapsed_ms)", "Wall clock", "Speed", "Outcome"].map(
+                            (header) => (
+                              <th
+                                key={header}
+                                scope="col"
+                                className="px-2 py-2 text-left text-2xs font-semibold tracking-wide text-ink-subtle uppercase"
+                              >
+                                {header}
+                              </th>
+                            ),
+                          )}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {batches.map((batch) => (
+                          <tr key={batch.index} className="border-b border-line last:border-0">
+                            <td className="tnum px-2 py-1.5 text-xs text-ink-subtle">
+                              #{batch.index + 1}
+                            </td>
+                            <td className="tnum px-2 py-1.5 text-xs">{batch.size}</td>
+                            <td className="tnum px-2 py-1.5 text-xs">
+                              {batch.elapsedMs === null ? (
+                                <Tooltip content="The whole batch died before the plugin answered, so there is no elapsed_ms.">
+                                  <span className="text-ink-subtle">—</span>
+                                </Tooltip>
+                              ) : (
+                                formatDuration(batch.elapsedMs)
+                              )}
+                            </td>
+                            <td className="tnum px-2 py-1.5 text-xs text-ink-muted">
+                              {formatDuration(batch.wallMs)}
+                            </td>
+                            <td className="tnum px-2 py-1.5 text-xs">
+                              {batch.elapsedMs && batch.elapsedMs > 0
+                                ? formatThroughput((batch.size / batch.elapsedMs) * 1000)
+                                : "—"}
+                            </td>
+                            <td className="px-2 py-1.5">
+                              <span className="flex flex-wrap gap-1">
+                                {batch.succeeded - batch.deduplicated > 0 ? (
+                                  <Badge tone="ok">{batch.succeeded - batch.deduplicated}</Badge>
+                                ) : null}
+                                {batch.deduplicated > 0 ? (
+                                  <Badge tone="info">{batch.deduplicated}</Badge>
+                                ) : null}
+                                {batch.failed > 0 ? <Badge tone="bad">{batch.failed}</Badge> : null}
+                              </span>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </Panel>
+
+            <Panel title="Options used" icon="settings">
+              <DescriptionList
+                columns={1}
+                items={[
+                  ...(job.kind === "purge"
+                    ? purgeOptionItems(job.options as PurgeOptions)
+                    : edit
+                      ? editOptionItems(job.options as EditOptions)
+                      : importOptionItems(job.options as ImportOptions)),
+                  {
+                    term: "Timing",
+                    value: (
+                      <>
+                        <DateTime iso={job.startedAt} /> → <DateTime iso={job.finishedAt} />
+                      </>
+                    ),
+                    hint:
+                      job.pluginElapsedMs > 0
+                        ? `The plugin worked ${formatDuration(job.pluginElapsedMs)} in total (summed across batches that ran in parallel)`
+                        : undefined,
+                    wide: true,
+                  },
+                ]}
+              />
+            </Panel>
+          </div>
+
+          {purge && results !== null ? <RemovalEvidence results={results} /> : null}
+
+          {/* --------------------------------------------------------- Per-row results */}
+          <Panel
+            title="Per-row results"
+            icon="file"
+            padded={false}
+            actions={
+              <div className="flex flex-wrap items-center gap-2">
+                <Input
                   icon="search"
-                  title="No row matches the filter"
-                  description="Change the search term, or pick a different filter above."
-                  action={
-                    <Button
-                      variant="secondary"
-                      icon="refresh"
-                      onClick={() => {
-                        setFilter("all");
-                        setQuery("");
-                      }}
-                    >
-                      Clear the filter
-                    </Button>
-                  }
+                  placeholder="Search by SKU or error code…"
+                  aria-label="Search the results"
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  className="h-8 w-52 text-xs"
                 />
-              )
+                <Segmented
+                  label="Filter the results"
+                  size="sm"
+                  value={filter}
+                  onChange={setFilter}
+                  options={[
+                    { value: "all", label: `All (${counts.all})` },
+                    {
+                      value: "created",
+                      // Same reason as the headline stat: this tab must not say
+                      // "Created" over rows that changed a product already on the site.
+                      label: `${edit ? "Changed" : purge ? "Removed" : "Created"} (${counts.created})`,
+                    },
+                    {
+                      value: "deduplicated",
+                      label: `${edit ? "Already correct" : "Already present"} (${counts.deduplicated})`,
+                    },
+                    { value: "failed", label: `Failed (${counts.failed})` },
+                  ]}
+                />
+              </div>
             }
-          />
-        )}
-      </Panel>
+          >
+            {resultsState === "loading" && results === null ? (
+              <SkeletonTable rows={8} columns={5} className="p-4" />
+            ) : resultsState === "error" ? (
+              <div className="p-4">
+                <ErrorState
+                  title="Could not read the results"
+                  message={resultsError ?? "Unknown error."}
+                  hint="Results are kept for 7 days. If this run has aged out, its rows have been cleaned up."
+                  onRetry={() => {
+                    setResultsState("loading");
+                    setResultsError(null);
+                    void fetchResults(job.id).then(applyResults);
+                  }}
+                />
+              </div>
+            ) : (
+              <DataTable
+                caption="Per-row results for this run"
+                rows={filtered}
+                columns={columns}
+                rowKey={(result) => String(result.index)}
+                defaultSort={{ key: "index", direction: "asc" }}
+                rowTone={(result) => (!result.ok ? "bad" : result.deduplicated ? "none" : "none")}
+                dense
+                empty={
+                  counts.all === 0 ? (
+                    <EmptyState
+                      icon="clock"
+                      title={active ? "No row has finished yet" : "No results"}
+                      description={
+                        active
+                          ? "Results are written after EVERY batch, so they will appear here as they land."
+                          : "This run processed nothing — it was probably cancelled before its first batch."
+                      }
+                      action={
+                        <ButtonLink href="/process" variant="secondary" icon="arrow-left">
+                          Back to activity
+                        </ButtonLink>
+                      }
+                    />
+                  ) : (
+                    <EmptyState
+                      icon="search"
+                      title="No row matches the filter"
+                      description="Change the search term, or pick a different filter above."
+                      action={
+                        <Button
+                          variant="secondary"
+                          icon="refresh"
+                          onClick={() => {
+                            setFilter("all");
+                            setQuery("");
+                          }}
+                        >
+                          Clear the filter
+                        </Button>
+                      }
+                    />
+                  )
+                }
+              />
+            )}
+          </Panel>
 
-      {/*
-        The failed products, kept as a list, with BOTH ways out of the situation.
-        They are not interchangeable, and offering only one is what made this feel
-        like a dead end:
+          {/*
+            The failed products, kept as a list, with BOTH ways out of the situation.
+            They are not interchangeable, and offering only one is what made this feel
+            like a dead end:
 
-          - Resend  — the SITE was at fault (timeout, a lock, a dropped connection).
-                      The data is fine, so send exactly the same rows again.
-          - Download — the DATA was at fault (a missing name, a price that is not a
-                      number, a category that does not exist). Resending identical
-                      rows would fail identically; the file has to be corrected first.
+              - Resend  — the SITE was at fault (timeout, a lock, a dropped connection).
+                          The data is fine, so send exactly the same rows again.
+              - Download — the DATA was at fault (a missing name, a price that is not a
+                          number, a category that does not exist). Resending identical
+                          rows would fail identically; the file has to be corrected first.
 
-        The error code on each row is what tells them apart, which is why the results
-        table now shows the message in full rather than cutting it off.
-      */}
-      {counts.failed > 0 && !active ? (
-        <Card tone="accent">
-          <CardBody className="space-y-3">
-            <div className="min-w-0">
-              <p className="text-sm font-medium text-accent-fg">
-                {formatNumber(counts.failed)} product(s) failed — the list is kept
-              </p>
-              <p className="text-xs text-accent-fg opacity-90">
-                Every failed row is below with its full error, and stays on record for as long as
-                this run does. Nothing has to be found again by hand.
-              </p>
-            </div>
+            The error code on each row is what tells them apart, which is why the results
+            table now shows the message in full rather than cutting it off.
+          */}
+          {counts.failed > 0 && !active ? (
+            <Card tone="accent">
+              <CardBody className="space-y-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-accent-fg">
+                    {formatNumber(counts.failed)} product(s) failed — the list is kept
+                  </p>
+                  <p className="text-xs text-accent-fg opacity-90">
+                    Every failed row is below with its full error, and stays on record for as long as
+                    this run does. Nothing has to be found again by hand.
+                  </p>
+                </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <Tooltip content="Creates a new run with exactly these rows. The idempotency keys are unchanged, so a row that did reach the site comes back as already present rather than becoming a second product.">
-                <Button
-                  variant="primary"
-                  icon="refresh"
-                  loading={busy === "retry"}
-                  disabled={store === null}
-                  onClick={() => void retryFailed()}
-                >
-                  Resend these {formatNumber(counts.failed)} product(s)
-                </Button>
-              </Tooltip>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Tooltip content="Creates a new run with exactly these rows. The idempotency keys are unchanged, so a row that did reach the site comes back as already present rather than becoming a second product.">
+                    <Button
+                      variant="primary"
+                      icon="refresh"
+                      loading={busy === "retry"}
+                      disabled={store === null}
+                      onClick={() => void retryFailed()}
+                    >
+                      Resend these {formatNumber(counts.failed)} product(s)
+                    </Button>
+                  </Tooltip>
 
-              {/* A real link rather than a scripted download: a plain GET the server
-                  already serves, and script-driven saves can be blocked. */}
-              <Tooltip content="A CSV of only the failed rows, with the error on each one — fix it in a spreadsheet and import it as a new file.">
-                <a
-                  href={`/api/jobs/${job.id}/results/export?only=failed`}
-                  download
-                  className="inline-flex h-9 items-center gap-1.5 rounded-md border border-accent-border px-3 text-xs font-medium text-accent-fg transition-colors duration-fast hover:bg-accent-soft"
-                >
-                  <Icon name="download" className="size-3.5" />
-                  Download the failed rows
-                </a>
-              </Tooltip>
+                  {/* A real link rather than a scripted download: a plain GET the server
+                      already serves, and script-driven saves can be blocked. */}
+                  <Tooltip content="A CSV of only the failed rows, with the error on each one — fix it in a spreadsheet and import it as a new file.">
+                    <a
+                      href={`/api/jobs/${job.id}/results/export?only=failed`}
+                      download
+                      className="inline-flex h-9 items-center gap-1.5 rounded-md border border-accent-border px-3 text-xs font-medium text-accent-fg transition-colors duration-fast hover:bg-accent-soft"
+                    >
+                      <Icon name="download" className="size-3.5" />
+                      Download the failed rows
+                    </a>
+                  </Tooltip>
 
-              <button
-                type="button"
-                onClick={() => setFilter("failed")}
-                className="text-xs text-accent-fg underline-offset-2 hover:underline"
-              >
-                Show only the failures below
-              </button>
-            </div>
+                  <button
+                    type="button"
+                    onClick={() => setFilter("failed")}
+                    className="text-xs text-accent-fg underline-offset-2 hover:underline"
+                  >
+                    Show only the failures below
+                  </button>
+                </div>
 
-            <p className="text-2xs text-accent-fg opacity-80">
-              Resend when the SITE was at fault — a timeout, a lock, a dropped connection. Download
-              and fix the file when the DATA was at fault: resending identical rows fails
-              identically. The error code on each row says which.
-            </p>
-          </CardBody>
-        </Card>
-      ) : null}
+                <p className="text-2xs text-accent-fg opacity-80">
+                  Resend when the SITE was at fault — a timeout, a lock, a dropped connection. Download
+                  and fix the file when the DATA was at fault: resending identical rows fails
+                  identically. The error code on each row says which.
+                </p>
+              </CardBody>
+            </Card>
+          ) : null}
+        </>
+      )}
 
       {/*
         Last thing on the page, deliberately.
@@ -1303,6 +1324,38 @@ export function JobDetailView({
 }
 
 /* ========================================================================== */
+
+/**
+ * A crawl's own section of the run detail screen.
+ *
+ * A crawl has no target site, no batches and no per-row results — it only READ
+ * a shop — so it gets a section of its own rather than a third arm bolted onto
+ * panels built for the other three kinds of run.
+ */
+function CrawlSummary({ job }: { job: JobState }) {
+  return (
+    <Card>
+      <CardBody className="space-y-3">
+        <p className="text-sm text-ink">
+          {formatNumber(job.total)} product{job.total === 1 ? "" : "s"} read from{" "}
+          <span className="font-medium">{job.storeLabel}</span>.
+        </p>
+        {job.status === "completed" && job.total > 0 ? (
+          /*
+           * The handoff. Nothing is published by a crawl, so this button is the
+           * only thing that turns a crawl into products in a shop — and it
+           * deliberately goes through the ordinary import wizard rather than a
+           * shortcut, so the same options, preview and image checks apply as to
+           * a CSV.
+           */
+          <ButtonLink href={`/import?crawl=${job.id}`} variant="primary" icon="arrow-right">
+            Import these products
+          </ButtonLink>
+        ) : null}
+      </CardBody>
+    </Card>
+  );
+}
 
 /**
  * The options shown have to be the options of the RIGHT kind of run.
