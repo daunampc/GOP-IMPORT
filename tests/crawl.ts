@@ -19,6 +19,7 @@ import { CrawlMoneyError, convert, fromDecimal, fromMinorUnits } from "../lib/so
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
 import { serverTransport } from "../lib/sources/crawl/transport";
+import { crawlShop } from "../lib/sources/crawl";
 
 let passed = 0;
 let failed = 0;
@@ -427,11 +428,95 @@ async function transportTests(): Promise<void> {
   );
 }
 
+async function orchestratorTests(): Promise<void> {
+  console.log("\nOrchestrator");
+
+  /** A transport that answers from the fixtures and records what was asked for. */
+  function fakeTransport(robots: string) {
+    const asked: string[] = [];
+
+    return {
+      asked,
+      transport: {
+        async fetchText(url: string) {
+          asked.push(url);
+          const path = new URL(url).pathname;
+
+          if (path === "/robots.txt") {
+            return { status: 200, contentType: "text/plain", body: robots };
+          }
+          if (path === "/products.json") {
+            const page = new URL(url).searchParams.get("page");
+            return {
+              status: 200,
+              contentType: "application/json",
+              body: page === "1" ? fixture("shopify-products.json") : '{"products":[]}',
+            };
+          }
+          return { status: 200, contentType: "text/html", body: "<html>cdn.shopify.com</html>" };
+        },
+      },
+    };
+  }
+
+  const open = fakeTransport("User-agent: *\nDisallow: /admin");
+
+  const outcome = await crawlShop({
+    shopUrl: "https://example.myshopify.com",
+    platform: "shopify",
+    limit: 100,
+    imagesPerProduct: 10,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: open.transport,
+  });
+
+  check("platform reported", outcome.platform === "shopify", outcome.platform);
+  check("both products", outcome.products.length === 2, String(outcome.products.length));
+  check("robots.txt was read first", open.asked[0].endsWith("/robots.txt"), open.asked[0]);
+  check("paging stopped on the empty page", open.asked.length === 3, JSON.stringify(open.asked));
+
+  const capped = await crawlShop({
+    shopUrl: "https://example.myshopify.com",
+    platform: "shopify",
+    limit: 1,
+    imagesPerProduct: 10,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: fakeTransport("").transport,
+  });
+  check("the limit is a hard ceiling", capped.products.length === 1, String(capped.products.length));
+
+  // The refusal that has no override. Spec §7.2.
+  const blocked = fakeTransport("User-agent: *\nDisallow: /");
+  await refusesAsync(
+    "robots.txt disallow stops the crawl",
+    () =>
+      crawlShop({
+        shopUrl: "https://example.myshopify.com",
+        platform: "shopify",
+        limit: 100,
+        imagesPerProduct: 10,
+        minorUnit: 2,
+        fxRate: null,
+        signal: new AbortController().signal,
+        log: () => {},
+        transport: blocked.transport,
+      }),
+    /robots\.txt/i,
+  );
+}
+
 async function main(): Promise<void> {
   moneyTests();
   robotsTests();
   shopifyTests();
   await transportTests();
+  await orchestratorTests();
 
   console.log(`\n${passed} passed, ${failed} failed`);
   if (failed > 0) {
