@@ -221,6 +221,8 @@ export function toProduct(raw: ShopifyProduct, options: ShopifyMapOptions): Prod
 export const shopifyAdapter: CrawlAdapter = {
   name: "shopify",
 
+  robotsPaths: ["/products.json"],
+
   detect(input: DetectInput): number {
     let score = 0;
 

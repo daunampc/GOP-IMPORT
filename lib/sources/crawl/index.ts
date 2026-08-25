@@ -126,11 +126,16 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
       );
     }
 
-    if (!rules.isAllowed("/products.json")) {
-      throw new CrawlError(
-        `${shopUrl.host} asks crawlers not to read its product list in robots.txt, so this run was ` +
-          "refused. There is no way to override that here.",
-      );
+    const adapter = pickAdapter(input.platform);
+
+    for (const path of adapter.robotsPaths) {
+      if (!rules.isAllowed(path)) {
+        throw new CrawlError(
+          `${shopUrl.host} asks crawlers not to fetch \`${path}\` in its robots.txt, and that is ` +
+            `where a ${adapter.name} crawl has to start. This run was refused, and there is no way ` +
+            "to override that here.",
+        );
+      }
     }
 
     /*
@@ -159,8 +164,6 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
       (transport as ServerTransport).raiseDelayTo(cappedDelayMs);
     }
 
-    const adapter = pickAdapter(input.platform);
-
     input.log({
       level: "info",
       message: `Reading ${shopUrl.host} as ${adapter.name}.`,
@@ -178,6 +181,7 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
       fxRate: input.fxRate,
       log: input.log,
       signal,
+      isAllowed: (pathname: string) => rules.isAllowed(pathname),
     })) {
       products.push(product);
     }

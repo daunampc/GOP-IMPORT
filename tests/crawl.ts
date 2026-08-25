@@ -610,6 +610,48 @@ async function orchestratorTests(): Promise<void> {
   );
 
   /*
+   * The robots check must follow the ADAPTER, not one hardcoded path. A site
+   * that blocks Shopify's entry path but not WooCommerce's has said nothing
+   * about a WooCommerce crawl, and vice versa.
+   */
+  const wooBlocked = fakeTransport("User-agent: *\nDisallow: /wp-json/");
+  await refusesAsync(
+    "a disallowed woocommerce entry path refuses",
+    () =>
+      crawlShop({
+        shopUrl: "https://example.myshopify.com",
+        platform: "woocommerce",
+        limit: 10,
+        imagesPerProduct: 5,
+        minorUnit: 2,
+        fxRate: null,
+        signal: new AbortController().signal,
+        log: () => {},
+        transport: wooBlocked.transport,
+      }),
+    /robots\.txt/i,
+  );
+
+  // ...and the same file says nothing about Shopify's entry path.
+  const shopifyOk = fakeTransport("User-agent: *\nDisallow: /wp-json/");
+  const stillFine = await crawlShop({
+    shopUrl: "https://example.myshopify.com",
+    platform: "shopify",
+    limit: 10,
+    imagesPerProduct: 5,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: shopifyOk.transport,
+  });
+  check(
+    "a rule about another platform does not block shopify",
+    stillFine.products.length === 2,
+    String(stillFine.products.length),
+  );
+
+  /*
    * The time-cap finding: a site can ask for a `Crawl-delay` of any size, and
    * this crawl must not adopt it wholesale — the worker has only four job slots
    * for the whole installation, and honouring an hour-long delay would hold one
