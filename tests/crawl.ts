@@ -107,6 +107,29 @@ function robotsTests(): void {
 
   const blocked = parseRobots("User-agent: *\nDisallow: /", CRAWLER_USER_AGENT);
   check("a site-wide block is honoured", !blocked.isAllowed("/products/x"));
+
+  /*
+   * Wildcards. Shopify's own robots.txt uses them, and a parser that treats
+   * `/*` as a literal silently ignores every such rule — the failure this
+   * whole translation exists to prevent.
+   */
+  const wild = parseRobots(
+    "User-agent: *\nDisallow: /*/checkouts/\nDisallow: /*.json$\nDisallow: /a*b",
+    CRAWLER_USER_AGENT,
+  );
+
+  check("a * matches a path segment", !wild.isAllowed("/en/checkouts/abc"));
+  check("a * matches an empty run", !wild.isAllowed("//checkouts/abc"));
+  check("a plain path is unaffected by wildcards", wild.isAllowed("/collections/all"));
+  check("a $ anchors the end", !wild.isAllowed("/products.json"));
+  check("a $ does not match past the end", wild.isAllowed("/products.json?page=2"));
+  check("a * matches in the middle", !wild.isAllowed("/axxxb"));
+  check("a rule still has to match at the start", wild.isAllowed("/z/axxxb"));
+
+  // A dot in a rule is a dot, not "any character".
+  const dotted = parseRobots("User-agent: *\nDisallow: /a.b", CRAWLER_USER_AGENT);
+  check("a . in a rule is literal", dotted.isAllowed("/axb"));
+  check("a . in a rule still matches itself", !dotted.isAllowed("/a.b"));
 }
 
 async function main(): Promise<void> {

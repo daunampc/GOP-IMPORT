@@ -2,10 +2,13 @@
  * robots.txt, hand-rolled.
  *
  * A dependency was considered and refused. `robots-parser` is 300 lines behind a
- * supply-chain surface, and this file needs exactly one behaviour beyond string
- * matching — longest-match-wins with Allow breaking the tie — which is the loop
- * at the bottom. `lib/sources/csv-dialect.ts` hand-rolls dialect detection for
- * the same reason, and this repo keeps its dependency list short on purpose.
+ * supply-chain surface, and this file needs two behaviours beyond string
+ * matching: longest-match-wins with Allow breaking the tie (the loop at the
+ * bottom), and translating each pattern's `*` and `$` into a regular expression
+ * (`matcherFor`, below) — Shopify's own robots.txt relies on both wildcards, and
+ * without them a rule like `Disallow: /*\/checkouts/` matches nothing at all.
+ * `lib/sources/csv-dialect.ts` hand-rolls dialect detection for the same reason,
+ * and this repo keeps its dependency list short on purpose.
  *
  * Do NOT import "server-only": the worker and the test suite both read this.
  */
@@ -28,7 +31,31 @@ export interface RobotsRules {
 
 interface Rule {
   allow: boolean;
+  /** The pattern as written. Its LENGTH decides precedence, so it is kept. */
   path: string;
+  matches: RegExp;
+}
+
+/**
+ * A robots.txt path pattern as a regular expression.
+ *
+ * Two wildcards are standard and both matter to real shops: `*` stands for any
+ * run of characters, and a trailing `$` anchors the end of the path. Shopify's
+ * own template uses them — `Disallow: /*\/checkouts/` and friends — and without
+ * translation those rules match nothing at all, so a shop that asked to be left
+ * alone would be crawled anyway. That failure is silent, which is what makes it
+ * worth the fifteen lines.
+ *
+ * Everything else is escaped, so a `.` or a `?` in a rule is the character
+ * rather than a metacharacter.
+ */
+function matcherFor(pattern: string): RegExp {
+  const anchored = pattern.endsWith("$");
+  const body = anchored ? pattern.slice(0, -1) : pattern;
+
+  const escaped = body.replace(/[.+?^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*");
+
+  return new RegExp(`^${escaped}${anchored ? "$" : ""}`);
 }
 
 /**
@@ -90,7 +117,7 @@ export function parseRobots(text: string, userAgent: string): RobotsRules {
         continue;
       }
       for (const name of active) {
-        groups.get(name)?.push({ allow: field === "allow", path: value });
+        groups.get(name)?.push({ allow: field === "allow", path: value, matches: matcherFor(value) });
       }
       continue;
     }
@@ -115,7 +142,7 @@ export function parseRobots(text: string, userAgent: string): RobotsRules {
       let best: Rule | null = null;
 
       for (const rule of rules) {
-        if (!path.startsWith(rule.path)) {
+        if (!rule.matches.test(path)) {
           continue;
         }
         // Longest match wins; Allow breaks a tie, which is what makes a specific
