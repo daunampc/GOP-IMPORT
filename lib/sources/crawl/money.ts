@@ -54,6 +54,45 @@ export function fromMinorUnits(value: number | string, minorUnit: number): strin
 }
 
 /**
+ * A decimal price string as an integer in the currency's smallest unit.
+ *
+ * The inverse of `fromMinorUnits`, and it parses the STRING rather than going
+ * through a float: `Number("18.005") * 100` is 1800.4999999999998, which rounds
+ * to a price that is not the one the shop quoted, and nothing anywhere would say
+ * so. Digits are counted instead, so losing one is an error rather than a
+ * rounding.
+ *
+ * Trailing zeros are not precision. Shopify quotes a VND price as "25400.00"
+ * even though the currency has no minor unit at all, so stripping them is what
+ * lets that parse rather than being refused for two decimals too many.
+ */
+export function fromDecimal(value: number | string, minorUnit: number): number {
+  if (!Number.isInteger(minorUnit) || minorUnit < 0 || minorUnit > 4) {
+    throw new CrawlMoneyError(`A currency's minor unit must be 0 to 4, not ${minorUnit}.`);
+  }
+
+  const text = String(value).trim();
+  const match = /^(-?)(\d+)(?:\.(\d*))?$/.exec(text);
+
+  if (match === null) {
+    throw new CrawlMoneyError(`Not a price: ${JSON.stringify(value)}.`);
+  }
+
+  const [, sign, whole, fractionRaw = ""] = match;
+  const fraction = fractionRaw.replace(/0+$/, "");
+
+  if (fraction.length > minorUnit) {
+    throw new CrawlMoneyError(
+      `${text} has ${fraction.length} decimal place(s), which a currency with ${minorUnit} cannot hold.`,
+    );
+  }
+
+  const minor = Number(`${whole}${fraction.padEnd(minorUnit, "0")}`);
+
+  return sign === "-" ? -minor : minor;
+}
+
+/**
  * Multiply by an operator-entered exchange rate.
  *
  * Two decimal places out, because that is what a shop displays. The rate itself

@@ -9,7 +9,7 @@
  */
 
 import type { Product, ProductVariation } from "../../../gop-client";
-import { convert, fromMinorUnits } from "../money";
+import { convert, fromDecimal, fromMinorUnits } from "../money";
 import { CrawlError, type CrawlAdapter, type CrawlContext, type DetectInput } from "../types";
 
 /** Shopify's hard maximum per page. Asking for more silently returns 250. */
@@ -102,20 +102,16 @@ export function fullSizeImage(url: string): string {
 /** A price string from Shopify, in the source currency, optionally converted. */
 function price(value: string, options: ShopifyMapOptions): string {
   /*
-   * Shopify's `/products.json` sends a DECIMAL string ("18.00"), unlike the AJAX
-   * `/products/{handle}.js` endpoint, which sends integer cents. Reading the
-   * decimal through `fromMinorUnits` would multiply the price by 100.
+   * `/products.json` sends a DECIMAL string ("18.00"), unlike the AJAX
+   * `/products/{handle}.js` endpoint, which sends integer cents. Parsing it as
+   * minor units directly would multiply every price by a hundred.
    *
-   * So the decimal is re-encoded to minor units first, and the round trip is
-   * deliberate: it is the one place that proves the number really was decimal,
-   * and it keeps every price in this file on the same code path.
+   * Both steps live in money.ts so there is one place that knows how a currency's
+   * decimals work — and so a price this crawler cannot read exactly becomes a
+   * skipped product with a warning, rather than a wrong number in a shop.
    */
-  const minor = Math.round(Number(value) * 10 ** options.minorUnit);
-  if (!Number.isFinite(minor)) {
-    throw new CrawlError(`Shopify sent a price this crawler cannot read: ${JSON.stringify(value)}.`);
-  }
+  const decimal = fromMinorUnits(fromDecimal(value, options.minorUnit), options.minorUnit);
 
-  const decimal = fromMinorUnits(minor, options.minorUnit);
   return options.fxRate === null ? decimal : convert(decimal, options.fxRate);
 }
 

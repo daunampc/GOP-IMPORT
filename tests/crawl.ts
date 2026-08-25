@@ -15,7 +15,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { CrawlMoneyError, convert, fromMinorUnits } from "../lib/sources/crawl/money";
+import { CrawlMoneyError, convert, fromDecimal, fromMinorUnits } from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
 
@@ -72,6 +72,27 @@ function moneyTests(): void {
   check("convert rounds to 2dp", convert("10.00", 25400) === "254000.00", convert("10.00", 25400));
   check("convert keeps precision", convert("19.99", 0.5) === "10.00", convert("19.99", 0.5));
   refuses("a zero rate", () => convert("10.00", 0), /rate/i);
+
+  check("decimal to cents", fromDecimal("18.00", 2) === 1800, String(fromDecimal("18.00", 2)));
+  check("one decimal place", fromDecimal("18.5", 2) === 1850, String(fromDecimal("18.5", 2)));
+  check("no decimal point", fromDecimal("18", 2) === 1800, String(fromDecimal("18", 2)));
+
+  /*
+   * The case that makes trailing zeros worth stripping: Shopify quotes VND with
+   * two decimals even though the currency has none.
+   */
+  check("VND quoted with decimals", fromDecimal("25400.00", 0) === 25400, String(fromDecimal("25400.00", 0)));
+  check("JPY quoted with decimals", fromDecimal("980.00", 0) === 980, String(fromDecimal("980.00", 0)));
+  check("three-decimal currency", fromDecimal("1.999", 3) === 1999, String(fromDecimal("1.999", 3)));
+  check("negative", fromDecimal("-18.00", 2) === -1800, String(fromDecimal("-18.00", 2)));
+
+  // The whole point of the change: precision loss is an error, not a rounding.
+  refuses("more decimals than the currency holds", () => fromDecimal("18.005", 2), /decimal place/i);
+  refuses("a decimal on a zero-decimal currency", () => fromDecimal("25400.50", 0), /decimal place/i);
+  refuses("not a number at all", () => fromDecimal("abc", 2), /not a price/i);
+
+  // Round trip, since the two functions have to agree.
+  check("round trip", fromMinorUnits(fromDecimal("64.00", 2), 2) === "64.00");
 }
 
 function robotsTests(): void {
