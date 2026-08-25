@@ -80,23 +80,4 @@ export const DEFAULT_CRAWL_OPTIONS: Omit<CrawlOptions, "shopUrl"> = {
   batchSize: 50,
 };
 
-/**
- * Decimals in a currency. Wrong by one is a price wrong by ten.
- *
- * Only the zero-decimal currencies need naming; everything else is two. The
- * three-decimal currencies (KWD, BHD, OMR) are listed because a Shopify store
- * quoting them would otherwise be read as a hundredth of its real price.
- */
-const ZERO_DECIMAL = new Set(["VND", "JPY", "KRW", "CLP", "ISK", "PYG", "RWF", "UGX", "VUV", "XAF", "XOF", "XPF"]);
-const THREE_DECIMAL = new Set(["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"]);
-
-export function minorUnitFor(currency: string): number {
-  const code = currency.trim().toUpperCase();
-  if (ZERO_DECIMAL.has(code)) {
-    return 0;
-  }
-  if (THREE_DECIMAL.has(code)) {
-    return 3;
-  }
-  return 2;
-}
+export { minorUnitFor } from "./sources/crawl/money";

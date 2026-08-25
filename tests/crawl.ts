@@ -25,6 +25,7 @@ import {
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
 import { toProduct as wooToProduct, type WooProduct } from "../lib/sources/crawl/adapters/woocommerce";
+import { toProduct as magentoToProduct, type MagentoItem } from "../lib/sources/crawl/adapters/magento";
 import { serverTransport, sleep } from "../lib/sources/crawl/transport";
 import { crawlShop, MAX_CRAWL_DELAY_MS } from "../lib/sources/crawl";
 
@@ -926,11 +927,56 @@ async function wooOrchestratorTests(): Promise<void> {
   );
 }
 
+function magentoTests(): void {
+  console.log("\nMagento mapping");
+
+  const payload = JSON.parse(fixture("magento-graphql.json")) as {
+    data: { products: { items: MagentoItem[] } };
+  };
+  const items = payload.data.products.items;
+  const opts = { imagesPerProduct: 10, fxRate: null };
+
+  const mug = magentoToProduct(items[0], opts);
+
+  check("name", mug.name === "Stoneware Mug", mug.name);
+  check("slug from url_key", mug.slug === "stoneware-mug", String(mug.slug));
+  check("sku", mug.sku === "MUG-24", String(mug.sku));
+  check("description html", mug.description === "<p>Heavy.</p>", String(mug.description));
+  check("category", JSON.stringify(mug.categories) === '["Kitchen"]');
+  check("in stock", mug.instock === true);
+
+  /*
+   * Magento sends price as a JSON NUMBER, and `final_price` is what is charged
+   * while `regular_price` is the list price — so a discounted product maps the
+   * lower one to sale_price, like WooCommerce and unlike Shopify's inversion.
+   */
+  check("regular price", mug.regular_price === "24.00", String(mug.regular_price));
+  check("sale price", mug.sale_price === "19.50", String(mug.sale_price));
+
+  // De-duplicated: `image` repeats the first gallery entry on most stores.
+  check(
+    "images de-duplicated and ordered",
+    JSON.stringify(mug.images) ===
+      '["https://m2.example/media/catalog/product/mug.jpg","https://m2.example/media/catalog/product/mug-2.jpg"]',
+    JSON.stringify(mug.images),
+  );
+
+  const plate = magentoToProduct(items[1], opts);
+  check("out of stock", plate.instock === false);
+  check("no sale when equal", plate.sale_price === undefined);
+  check("empty description omitted", plate.description === undefined);
+  check("no images", JSON.stringify(plate.images) === "[]");
+
+  const converted = magentoToProduct(items[0], { ...opts, fxRate: 25400 });
+  check("fx applied", converted.regular_price === "609600.00", String(converted.regular_price));
+}
+
 async function main(): Promise<void> {
   moneyTests();
   robotsTests();
   shopifyTests();
   wooTests();
+  magentoTests();
   await transportTests();
   await orchestratorTests();
   await wooOrchestratorTests();

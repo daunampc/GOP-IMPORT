@@ -18,6 +18,29 @@
 export class CrawlMoneyError extends Error {}
 
 /**
+ * How many decimal places a currency has.
+ *
+ * Only the exceptions are listed; everything else is two. Wrong by one is a
+ * price wrong by ten, so this lives here with the rest of the money rules
+ * rather than being copied into each adapter that needs it.
+ */
+const ZERO_DECIMAL = new Set(["VND", "JPY", "KRW", "CLP", "ISK", "PYG", "RWF", "UGX", "VUV", "XAF", "XOF", "XPF"]);
+const THREE_DECIMAL = new Set(["BHD", "IQD", "JOD", "KWD", "LYD", "OMR", "TND"]);
+
+export function minorUnitFor(currency: string | null | undefined): number {
+  const code = (currency ?? "").trim().toUpperCase();
+
+  if (ZERO_DECIMAL.has(code)) {
+    return 0;
+  }
+  if (THREE_DECIMAL.has(code)) {
+    return 3;
+  }
+
+  return 2;
+}
+
+/**
  * An integer in a currency's smallest unit, as a decimal string.
  *
  * The `minorUnit` argument is the whole point of this function. Shopify sends
