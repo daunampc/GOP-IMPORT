@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { CrawlMoneyError, convert, fromDecimal, fromMinorUnits } from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
+import { toProduct as wooToProduct, type WooProduct } from "../lib/sources/crawl/adapters/woocommerce";
 import { serverTransport, sleep } from "../lib/sources/crawl/transport";
 import { crawlShop, MAX_CRAWL_DELAY_MS } from "../lib/sources/crawl";
 
@@ -266,6 +267,63 @@ function shopifyTests(): void {
 
   const converted = toProduct(payload.products[0], { ...opts, fxRate: 25400 });
   check("fx applies to the price", converted.regular_price === "457200.00", String(converted.regular_price));
+}
+
+function wooTests(): void {
+  console.log("\nWooCommerce mapping");
+
+  const products = JSON.parse(fixture("woo-store-api.json")) as WooProduct[];
+  const variation = JSON.parse(fixture("woo-variation.json")) as WooProduct;
+  const opts = { imagesPerProduct: 10, fxRate: null };
+
+  const tote = wooToProduct(products[0], [], opts);
+
+  check("name", tote.name === "Cotton Tote", tote.name);
+  check("slug", tote.slug === "cotton-tote", String(tote.slug));
+  check("sku", tote.sku === "TOTE-01", String(tote.sku));
+  check("description", tote.description === "<p>Roomy.</p>", String(tote.description));
+  check("short description", tote.short_description === "<p>Roomy tote.</p>");
+
+  /*
+   * The Store API states its OWN exponent per product. Reading the crawl's
+   * configured currency instead would price a VND shop as if it were USD.
+   */
+  check("price from minor units", tote.regular_price === "14.50", String(tote.regular_price));
+  check("no sale when sale equals regular", tote.sale_price === undefined);
+  check("in stock", tote.instock === true);
+  check("category name only", JSON.stringify(tote.categories) === '["Bags"]');
+  check("tag name only", JSON.stringify(tote.tags) === '["cotton"]');
+  check("simple", tote.type === "simple", String(tote.type));
+
+  const shirt = wooToProduct(products[1], [variation], opts);
+
+  check("variable", shirt.type === "variable", String(shirt.type));
+  check("attribute name", shirt.attributes?.[0].name === "Size", JSON.stringify(shirt.attributes));
+  check(
+    "attribute values from terms",
+    JSON.stringify(shirt.attributes?.[0].values) === '["S","M"]',
+    JSON.stringify(shirt.attributes?.[0].values),
+  );
+  check("attribute drives variation", shirt.attributes?.[0].used_for_variation === true);
+  check("one variation fetched", (shirt.variations ?? []).length === 1);
+  check("variation sku", shirt.variations?.[0].sku === "SHIRT-S", String(shirt.variations?.[0].sku));
+  check("variation regular price", shirt.variations?.[0].regular_price === "59.00");
+  check("variation sale price", shirt.variations?.[0].sale_price === "49.00");
+  check(
+    "variation attributes",
+    JSON.stringify(shirt.variations?.[0].attributes) === '[{"name":"Size","value":"S"}]',
+    JSON.stringify(shirt.variations?.[0].attributes),
+  );
+
+  // A zero-decimal currency must not be divided by a hundred.
+  const vnd = JSON.parse(fixture("woo-store-api.json")) as WooProduct[];
+  vnd[0].prices.currency_code = "VND";
+  vnd[0].prices.currency_minor_unit = 0;
+  vnd[0].prices.price = "25400";
+  vnd[0].prices.regular_price = "25400";
+  vnd[0].prices.sale_price = "25400";
+  const dong = wooToProduct(vnd[0], [], opts);
+  check("VND has no minor unit", dong.regular_price === "25400", String(dong.regular_price));
 }
 
 async function transportTests(): Promise<void> {
@@ -681,6 +739,7 @@ async function main(): Promise<void> {
   moneyTests();
   robotsTests();
   shopifyTests();
+  wooTests();
   await transportTests();
   await orchestratorTests();
 
