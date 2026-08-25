@@ -10,7 +10,27 @@ Phạm vi: một repo — `clients/manager-push-product-wordpress` (web + worker
 Plugin `GPM_toshstack` **không đổi**: crawler không thêm bất kỳ endpoint nào cho
 plugin.
 
-**Trạng thái: thiết kế, chưa cài đặt.**
+**Trạng thái: §1–§11 đã cài đặt xong (kế hoạch 1 — chỉ Shopify). §12 chưa làm.**
+Tài liệu này được **cập nhật lại sau khi code chạy**, không để nguyên bản thiết
+kế ban đầu — vì một tài liệu sai còn tệ hơn không có tài liệu. Mỗi chỗ cài đặt
+đi khác bản đầu được đánh dấu bằng một khối `> **Sửa so với bản đầu**` ngay tại
+mục của nó, kèm lý do, chứ không lặng lẽ viết lại. Danh sách đầy đủ từng bước
+nằm ở `.superpowers/sdd/progress.md`; đây là tóm tắt:
+
+| § | Bản đầu | Thực tế |
+|---|---|---|
+| §4 | 5 adapter: `shopify`, `woocommerce`, `magento`, `generic`, `etsy` | kế hoạch 1 chỉ ship **`shopify`**; bốn adapter còn lại là kế hoạch 2, chưa có dòng code nào |
+| §4.1 / §6 | giá tính bằng số thực (nhân/chia trực tiếp trên `number`) | `lib/sources/crawl/money.ts` giữ giá là **chuỗi**, đếm chữ số thay vì chia nổi, và **từ chối** một giá trị mất chữ số thập phân thay vì âm thầm làm tròn |
+| §6 | thử `?currency=USD` trước khi hỏi tỉ giá tay | **không làm** — operator luôn phải tự gõ `sourceCurrency`, crawler tin đúng con số đó |
+| §7.1 | SSRF guard với `fetch(url, { redirect: "follow" })` | `follow` để lọt guard ở hop chuyển hướng thứ hai; đổi sang `redirect: "manual"`, soi lại từng hop, có trần số hop |
+| §7.2 | robots.txt so khớp theo tiền tố chuỗi | rule `*`/`$` thật của Shopify khớp **không trúng gì cả**; thêm dịch wildcard sang `RegExp` |
+| §7.4 | mỗi lượt gọi dựng transport riêng khi cần | hai transport làm mất độ trễ per-host giữa robots.txt và request đầu tiên; gộp về **một** transport, nâng trần độ trễ bằng `raiseDelayTo()` |
+| §8.1 | `platform: auto` + ghi đè tay; `transport: browser` khoá kèm lý do | không có `auto`; UI hiện đủ 5 tên, khoá 4 cái không phải `shopify`; trường `transport` **không hiện lên form** vì `browser` chưa xây ở kế hoạch này |
+| §8.2 | (không nói riêng ngôn ngữ của hộp thoại) | Cancel/Stop/Delete ban đầu tả một crawl bằng đúng câu chữ của import ("plugin đã ghi", "đã lên site"); sửa lại bằng bản dành riêng cho crawl |
+| §10 bước 3 | cần một migration cho `kind: "crawl"` | **không cần** — `db/schema.ts:266` đã ghi rõ `kind` là enum ở mức TypeScript, không phải Postgres |
+
+Một chỗ đã kiểm và **khớp đúng bản đầu**, ghi lại để người đọc không phải đoán:
+§3.2 — sản phẩm crawl nằm ở `job_item`, đúng như thiết kế dưới đây.
 
 ---
 
@@ -111,6 +131,13 @@ Thêm `"crawl"` vào `db/schema.ts:275`:
 kind: text("kind", { enum: ["import", "purge", "update", "crawl"] })
 ```
 
+> **Sửa so với bản đầu.** §10 bước 3 của tài liệu này liệt "migration" như một
+> phần của việc thêm `kind: "crawl"`. Không có migration nào được tạo, và không
+> cần: `db/schema.ts:266` — comment do chính người thêm `kind` thứ ba viết —
+> đã ghi rõ *"A TS-level enum, not a Postgres one, so adding a member needs no
+> migration."* `pnpm db:generate` không sinh ra file nào cho thay đổi này, và
+> cơ sở dữ liệu không bị đụng tới trong suốt việc cài đặt.
+
 - `storeId` = `null` (crawl không có site đích)
 - `storeUrl` = URL shop bị crawl
 - `storeLabel` = host của nó
@@ -136,12 +163,22 @@ Nghĩa là thêm `"crawl"` sẽ **âm thầm** hiển thị crawl như một imp
 3. Loại crawl ra khỏi: retry-failed, schedule, results export. Một crawl không có
    dòng nào để retry.
 
+> **Đi xa hơn bản đầu ở điểm 3.** Bản đầu chỉ yêu cầu loại crawl khỏi schedule
+> bằng logic. Khi cài đặt, `lib/schedules.ts` đổi kiểu `kind` thành
+> `Exclude<JobKind, "crawl">` — "một crawl không bao giờ được lên lịch" trở
+> thành lỗi compile nếu có ai lỡ đi ngược lại, không còn chỉ là một quy tắc
+> runtime phải nhớ.
+
 ### 3.2 Sản phẩm crawl được lưu ở đâu
 
 Vào `job_item` (`db/schema.ts:493`) — bảng jsonb khoá theo job id, sinh ra để
 *"payload của run không nằm trong bảng `job`, để list queue khỏi kéo theo vài MB
 JSON"*. Với crawl, payload đó là **đầu ra** thay vì đầu vào. Cùng bảng, cùng lý
 do; chiều đi của dữ liệu không phải điều bảng này quan tâm. Ghi comment tại chỗ.
+
+**Khớp đúng bản đầu.** `runCrawl` trong `worker/index.ts` ghi đúng vào
+`jobItems` khi crawl xong (`.insert(jobItems)...onConflictDoUpdate`) — không có
+gì khác so với những gì viết ở trên.
 
 ### 3.3 Hàng đợi
 
@@ -179,6 +216,13 @@ Mỗi adapter thử **đường nhanh** (fetch + JSON) trước, chỉ leo lên 
 | `generic` | JSON-LD `@type: Product` → microdata → OG/`product:price:*` → `sitemap.xml` | DOM heuristic |
 | `etsy` | *không có* — Etsy không mở JSON | trang listing, `il_fullxfull`, lọc ảnh review |
 
+> **Sửa so với bản đầu.** Bảng trên liệt năm adapter. Việc cài đặt tách làm hai
+> kế hoạch (xem §10): **kế hoạch 1** — bản đang chạy — chỉ ship `shopify`
+> (`lib/sources/crawl/adapters/shopify.ts`); `woocommerce`, `magento`,
+> `generic`, `etsy` là **kế hoạch 2**, chưa có một dòng code nào. `ADAPTERS` ở
+> `lib/sources/crawl/index.ts` hiện chỉ có một phần tử, và `pickAdapter()` từ
+> chối mọi platform khác bằng một lỗi rõ ràng thay vì thử đoán.
+
 Nhận diện nền tảng chấm theo điểm, không theo một dấu hiệu duy nhất: header/cookie
 (`x-shopify-*`, `wp-content`, `X-Magento-*`), `<meta name="generator">`, URL asset,
 hình dạng đường dẫn. Người dùng luôn **ghi đè được** lựa chọn ở form.
@@ -189,6 +233,16 @@ hình dạng đường dẫn. Người dùng luôn **ghi đè được** lựa c
 - WooCommerce Store API: chuỗi đơn vị nhỏ + `currency_minor_unit` → chia
   `10^minor_unit`. **Không hard-code 100**: JPY và VND có `minor_unit = 0`, chia
   100 là sai giá 100 lần.
+
+> **Sửa so với bản đầu, sau một bug thật.** Cả bản đầu và kế hoạch cài đặt định
+> tính giá bằng số thực — nhân/chia trực tiếp trên `number`. Test viết ở Task 1
+> bắt được: `Number("18.005") * 100` không ra `1800` mà ra `1800.4999999999998`,
+> và phép quy đổi tỉ giá ở §6 cộng dồn sai số đó tiếp. Sửa: `lib/sources/crawl/
+> money.ts` giữ giá là **chuỗi thập phân** suốt đường đi. `fromMinorUnits` /
+> `fromDecimal` đếm chữ số thay vì chia nổi, và `convert()` nhân trên số nguyên
+> (hàng trăm) rồi mới chia lại. Cả hai **từ chối** (`CrawlMoneyError`) một chuỗi
+> có nhiều chữ số thập phân hơn `minorUnit` cho phép, thay vì âm thầm làm tròn
+> sai giá.
 
 ### 4.2 Phân trang
 
@@ -245,6 +299,16 @@ nhận được**, và cảnh báo nếu nó khác tiền tệ người dùng đ
 thử `?currency=USD` trước; nếu shop không bán bằng USD thì tham số này không có
 tác dụng — vẫn phải quay về tỉ giá gõ tay.
 
+> **Sửa so với bản đầu — một khoảng trống, chưa phải một quyết định có chủ
+> đích.** Adapter Shopify của kế hoạch 1 **không** thử `?currency=USD`.
+> Operator phải tự gõ `sourceCurrency` (mặc định `USD`) ở form `/crawl`, và
+> crawler tin đúng con số đó khi chọn `minorUnit` để giải mã giá. Nếu shop thật
+> sự bán bằng một tiền tệ khác, giá sẽ bị đọc sai số chữ số thập phân mà không
+> có gì trên màn hình cảnh báo. Đây không phải một lựa chọn có ghi lý do như
+> các mục khác trong bảng tóm tắt ở đầu tài liệu — kế hoạch cài đặt không nhắc
+> tới đoạn này của thiết kế, nên nó rơi mất mà không ai quyết định bỏ. Để lại
+> cho kế hoạch sau.
+
 ---
 
 ## 7. An toàn
@@ -260,10 +324,27 @@ Vậy nên mọi request ra ngoài của crawler đi qua `assertFetchableUrl()`
 miền và soi từng địa chỉ trả về**, chứ không phải `blockedReason()` chỉ so chuỗi.
 Không có ngoại lệ, kể cả URL do adapter tự dựng.
 
+> **Sửa so với bản đầu, sau một lỗ SSRF thật.** Kế hoạch cài đặt ban đầu viết
+> transport bằng `fetch(url, { redirect: "follow" })`. Với `follow`, Node tự đi
+> theo chuỗi chuyển hướng và không gọi lại `assertFetchableUrl()` ở hop thứ
+> hai — một host công khai đáp `302` sang `169.254.169.254` sẽ được đọc thay
+> cho crawler, đúng lỗ mà `lib/outbound-url.ts` tồn tại để chặn. Sửa:
+> `lib/sources/crawl/transport.ts` dùng `redirect: "manual"`, tự đi từng hop,
+> gọi lại `assertFetchableUrl()` ở **mỗi** hop, và có trần `MAX_REDIRECTS = 5`
+> để một chuỗi chuyển hướng vòng lặp không treo run.
+
 ### 7.2 robots.txt — từ chối cứng
 
 Tải `robots.txt` trước, cache trong suốt run. Nếu đường dẫn sản phẩm bị
 `Disallow` → run **fail** với thông báo rõ. **Không có nút bỏ qua.**
+
+> **Sửa so với bản đầu.** Bản parser robots.txt đầu tiên chỉ so khớp **tiền tố
+> chuỗi**. robots.txt thật của Shopify dùng `*` và `$` (ví dụ
+> `Disallow: /*/checkouts/`) — so tiền tố với các rule đó **không khớp gì cả**,
+> nên chúng trở thành no-op câm lặng và mục đích của cả mục này bị vô hiệu mà
+> không ai biết. Sửa: `lib/sources/crawl/robots.ts` dịch mỗi pattern sang một
+> `RegExp` (`matcherFor`), có xử lý `*` và `$`, trước khi so khớp; longest-match
+> thắng, `Allow` phá vỡ trường hợp bằng nhau.
 
 ### 7.3 CAPTCHA
 
@@ -281,6 +362,15 @@ phẩm, không phải thiếu sót.
 - **Trần sản phẩm** = `maxProductsPerRun` của account (`lib/limits.ts:26`), giao
   với số người dùng nhập ở form. Không thêm khái niệm giới hạn mới.
 - Trần số trang và trần thời gian chạy, để một sitemap vòng lặp không quay mãi.
+
+> **Sửa so với bản đầu.** Bản đầu (và kế hoạch cài đặt) dựng một
+> `serverTransport` riêng để đọc robots.txt và một cái khác cho các request
+> sản phẩm. Vì độ trễ per-host (`nextAllowedAt`) sống trong closure của
+> transport, dựng hai bản làm mất đúng khoảng nghỉ giữa robots.txt và request
+> sản phẩm đầu tiên — khoảng nghỉ lẽ ra phải chắc chắn có, vì site vừa tự nói
+> ra `Crawl-delay` của nó. Sửa: `crawlShop()` dựng **một** transport cho toàn
+> bộ run, và nâng trần độ trễ của nó bằng `raiseDelayTo()` sau khi đọc
+> robots.txt — hàm chỉ nâng, không hạ.
 
 ### 7.5 Ảnh
 
@@ -309,6 +399,19 @@ Form, dùng component sẵn có trong `components/ui/`:
 - **Transport**: `server` (mặc định) hoặc `browser` — đi qua Chrome của khách (§12).
   Ô `browser` bị khoá và ghi lý do khi chưa có thiết bị nào online.
 
+> **Sửa so với bản đầu, ở hai điểm.** Không có tuỳ chọn `auto`:
+> `CRAWL_PLATFORMS` (`lib/crawl-options.ts`) chỉ liệt tên nền tảng thật; form
+> hiện đủ cả 5 tên nhưng khoá 4 cái không phải `shopify` với ghi chú "Not in
+> this build yet", và `pickAdapter()` từ chối `"auto"` bằng một lỗi rõ ràng
+> nếu có ai cố gửi thẳng — với một adapter, một bộ nhận diện chỉ có thể trả
+> lời "shopify", và một câu trả lời tự động thực ra là một hằng số đội lốt.
+> Thứ hai: trường **Transport không xuất hiện trên form** — không phải bị
+> khoá kèm lý do như câu trên định. `browser` chưa được xây ở kế hoạch này
+> (§12), nên `CrawlForm` luôn gửi `transport: "server"`, và route
+> `POST /api/crawl` từ chối bất kỳ giá trị khác ngay lúc tạo run — đúng tinh
+> thần "fail ngay, không xếp hàng rồi treo" của §12.10, chỉ khác là lý do
+> không phải "chưa có thiết bị nào online" mà là transport đó chưa tồn tại.
+
 Bấm Start → tạo job `kind: "crawl"` → chuyển sang `/process/[id]`.
 
 Thêm một mục vào `components/shell/nav.ts`.
@@ -320,6 +423,15 @@ Thêm một mục vào `components/shell/nav.ts`.
 - ẩn phần site đích / batch / kết quả từng dòng (crawl không có),
 - hiện: nền tảng nhận được, số sản phẩm tìm thấy, số bỏ qua, tiền tệ,
 - khi `completed`: nút **"Import these products"**.
+
+> **Sửa so với bản đầu, sau một bug thật.** Các hộp thoại Cancel/Stop/Delete
+> trên `/process/[id]` (`job-detail-view.tsx`) ban đầu dùng đúng câu chữ của
+> một import cho cả crawl — "the plugin may already have committed the
+> batch", "products already published are not touched" — dù một crawl không
+> gọi plugin và không viết vào site nào. Reviewer bắt được ở bước cài đặt.
+> Sửa: mỗi hộp thoại có một nhánh riêng khi run là crawl, nói đúng sự thật của
+> nó — không có gì trên site để hoàn tác, và Cancel/Stop chỉ bỏ dữ liệu đã đọc
+> mà chưa kịp đưa vào wizard.
 
 ### 8.3 Nối vào wizard
 

@@ -521,6 +521,38 @@ An unrecognised file **says so** and drops into Custom with the columns matched 
 far as their names allowed — it is never quietly read as Shopify. A mapping is
 remembered against the signature of the column set.
 
+### The crawler: a second source, not a second pipeline
+
+`/crawl` (**Shopify only**, so far) reads a public storefront instead of accepting
+a file. It runs as its own job `kind` — `"crawl"` — through the exact same queue,
+Cancel/Stop buttons and live log every other run kind uses, but it never writes
+anywhere: it fetches `/products.json`, refuses outright if the shop's `robots.txt`
+disallows the product listing (no override — see `lib/sources/crawl/robots.ts`),
+and stops once it has read the limit typed into the form — refused outright at
+the route, before the run is even created, if that number exceeds the account's
+own `maxProductsPerRun` ceiling (`lib/limits.ts`) rather than being silently
+clamped down to it.
+
+What it finds is written to `job_item` — the same JSON-payload table every other
+run kind already writes to, just carrying an **output** this time instead of an
+input — and `lib/build-products.ts` reads it back through a `fromCrawl` branch
+that returns the identical `SourceResult` shape `fromCsv` does. Nothing
+downstream can tell the difference: `applyOptions`, the preview, all four wizard
+steps and the `idempotency_key` that keeps a re-import from duplicating products
+run completely unmodified. A crawl feeds the wizard at `/import?crawl=<jobId>`
+exactly the way a CSV feeds it at the drop zone.
+
+Prices are decoded from Shopify's integer cents into a decimal string by
+hand-rolled string arithmetic (`lib/sources/crawl/money.ts`), not by dividing
+floats — `Number("18.005") * 100` is not `1800`, and an operator-entered exchange
+rate compounds that error further. The module refuses to parse a price it cannot
+represent exactly rather than silently rounding it.
+
+Platform auto-detection and the WooCommerce/Magento/Etsy/generic adapters are
+designed (`docs/superpowers/specs/2026-08-24-product-crawler-source-design.md`)
+but not built: this release reads Shopify shops only, and says so on the form
+rather than offering a platform it cannot read.
+
 ## The design system
 
 Colour, type, spacing, radii, shadow and motion are declared in one place,
@@ -1078,6 +1110,18 @@ URL path, and the strongest assertion in all four is the **request count read fr
 the fixture itself** — how many times something was sent is a fact only the
 receiving end holds, where counting log lines would only count this app's own
 account of what it did.
+
+```bash
+./tests/crawl.sh
+```
+
+The odd one out: no Docker, no Postgres, no Redis, no fake host. Everything the
+crawler's fast path depends on — decoding Shopify's cents into a decimal price
+without going through a float, translating a `*`/`$` robots.txt pattern into a
+match, mapping a Shopify product (including the single-variant "Default Title"
+case) into the shape the rest of the pipeline already expects — is a pure
+function over a saved fixture, so the whole suite runs in under a second and
+there is no excuse for it ever being skipped. **108 assertions, 0 failures.**
 
 Static checks:
 
