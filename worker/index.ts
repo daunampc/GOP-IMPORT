@@ -48,7 +48,7 @@ import { describeEdit, type EditOptions } from "../lib/edit-options";
 import { logJob } from "../lib/job-log";
 import { notifyRunFinished } from "../lib/notify";
 import { advanceSchedule } from "../lib/schedules";
-import { importVerdict, productEditVerdict, removeVerdict } from "../lib/limits";
+import { importVerdict, limitsFor, productEditVerdict, removeVerdict } from "../lib/limits";
 import { getEditItems } from "../lib/jobs";
 import { getPurgeItems } from "../lib/purge";
 import { STOP_CHANNEL, createConnection, redis } from "../lib/redis";
@@ -68,6 +68,12 @@ import { toProductUpdate } from "../lib/product-update";
 import { WRITE_MODE_LABELS, type ImportOptions } from "../lib/import-options";
 import { imageUploadSupport } from "../lib/plugin-version";
 import type { PurgeOptions } from "../lib/purge-options";
+import { crawlShop } from "../lib/sources/crawl";
+import { CrawlError } from "../lib/sources/crawl/types";
+import { minorUnitFor, type CrawlOptions } from "../lib/crawl-options";
+import { db } from "../db";
+import { eq } from "drizzle-orm";
+import { jobItems, jobs as jobsTable } from "../db/schema";
 
 const CONCURRENCY = Number.parseInt(process.env.WORKER_CONCURRENCY ?? "4", 10);
 
@@ -249,6 +255,26 @@ async function runJob(job: Job<{ jobId: string }>): Promise<void> {
     });
   }
 
+  /*
+   * A CRAWL LEAVES HERE, before the target-site lookup.
+   *
+   * Position is the whole comment. A crawl has no target site, so `storeId` is
+   * empty and `getStoreUnscoped` below returns null — which that code correctly
+   * reads as "the site was deleted" and fails the run. Everything from here down
+   * is about writing to a shop, and a crawl only reads one.
+   */
+  if (state.kind === "crawl") {
+    const controller = new AbortController();
+    inFlight.set(jobId, controller);
+
+    try {
+      await runCrawl(state, controller.signal);
+    } finally {
+      inFlight.delete(jobId);
+    }
+    return;
+  }
+
   const store = await getStoreUnscoped(state.storeId);
   if (store === null) {
     await logJob(jobId, {
@@ -289,7 +315,16 @@ async function runJob(job: Job<{ jobId: string }>): Promise<void> {
             count: state.total,
             threads: (state.options as EditOptions).threads,
           })
-        : await removeVerdict(state.createdBy);
+        : state.kind === "purge"
+          ? await removeVerdict(state.createdBy)
+          : /*
+             * Exhaustive on purpose. A crawl returns above and never reaches
+             * this, and a fifth kind must not silently inherit the removal
+             * permission the way a crawl would have.
+             */
+            (() => {
+              throw new Error(`No permission check defined for a run of kind "${state.kind}".`);
+            })();
 
   if (!verdict.ok) {
     await logJob(jobId, {
@@ -1081,6 +1116,129 @@ async function runPurge(
   // cache without WooCommerce ever being told.
   if (outcome.succeeded > 0) {
     await clearTransients(client, jobId);
+  }
+}
+
+/**
+ * A crawl: read a shop, and stage what was found.
+ *
+ * The odd one out among the four run kinds, and worth stating why. The other
+ * three are handed a payload and send it to a site; this one is handed a URL and
+ * comes back with a payload. So it writes `job_item` at the END rather than
+ * reading it at the start, and it finishes without having touched anybody's shop.
+ *
+ * The products it stages are read back by `fromCrawl` in `lib/build-products.ts`
+ * when the operator carries them into the import wizard.
+ */
+async function runCrawl(state: JobState, signal: AbortSignal): Promise<void> {
+  const jobId = state.id;
+  const options = state.options as CrawlOptions;
+
+  await markRunning(jobId);
+
+  if (options.transport === "browser") {
+    const message =
+      "This run asked to crawl through the customer's own Chrome, which this build cannot do yet.";
+    await logJob(jobId, { level: "error", stage: "crawl", message });
+    await settleRun(jobId, "failed", message);
+    return;
+  }
+
+  /*
+   * The account's ceiling, applied here as well as at the route.
+   *
+   * Both, and for the same reason the import path checks twice: the route gives
+   * an immediate refusal, and this catches a limit lowered between queueing and
+   * running.
+   */
+  const limits = await limitsFor(state.createdBy);
+  const ceiling =
+    limits.maxProductsPerRun === null
+      ? options.limit
+      : Math.min(options.limit, limits.maxProductsPerRun);
+
+  if (ceiling < options.limit) {
+    await logJob(jobId, {
+      level: "warn",
+      stage: "limits",
+      message: `This account is capped at ${limits.maxProductsPerRun} products per run, so the crawl will stop there.`,
+      detail: { asked: options.limit, ceiling },
+    });
+  }
+
+  const warnings: string[] = [];
+
+  try {
+    const outcome = await crawlShop({
+      shopUrl: options.shopUrl,
+      platform: options.platform,
+      limit: ceiling,
+      imagesPerProduct: options.imagesPerProduct,
+      minorUnit: minorUnitFor(options.sourceCurrency),
+      fxRate: options.fxRate,
+      signal,
+      log: (line) => {
+        // Fire and forget: a log line must never be able to fail a crawl.
+        void logJob(jobId, { level: line.level, stage: "crawl", message: line.message, detail: line.detail });
+        if (line.level === "warn") {
+          warnings.push(line.message);
+        }
+      },
+    });
+
+    if (signal.aborted) {
+      await logJob(jobId, {
+        level: "warn",
+        stage: "cancel",
+        message: `Stopped after reading ${outcome.products.length} product(s). Nothing was staged.`,
+      });
+      await settleRun(jobId, "cancelled", null);
+      return;
+    }
+
+    if (options.fxRate !== null) {
+      await logJob(jobId, {
+        stage: "crawl",
+        message:
+          `Prices converted ${options.sourceCurrency} → ${options.fxTarget || "target"} at ` +
+          `${options.fxRate} — a rate entered by the operator, not looked up.`,
+        detail: { rate: options.fxRate, from: options.sourceCurrency, to: options.fxTarget },
+      });
+    }
+
+    // The payload the wizard will read back. Written before the run is marked
+    // complete, so a "completed" crawl always has its products.
+    await db
+      .insert(jobItems)
+      .values({ jobId, items: outcome.products })
+      .onConflictDoUpdate({ target: jobItems.jobId, set: { items: outcome.products } });
+
+    await db
+      .update(jobsTable)
+      .set({ total: outcome.products.length, processed: outcome.products.length, succeeded: outcome.products.length })
+      .where(eq(jobsTable.id, jobId));
+
+    await logJob(jobId, {
+      stage: "finish",
+      message: `Read ${outcome.products.length} product(s) from ${options.shopUrl}.`,
+      detail: { platform: outcome.platform, total: outcome.products.length, warnings: warnings.length },
+    });
+
+    await settleRun(jobId, "completed", null);
+  } catch (error) {
+    /*
+     * A CrawlError is a sentence for the operator — "robots.txt says no",
+     * "password protected", "this needs the browser crawler" — so it is shown as
+     * written. Anything else is a bug and is reported as one rather than dressed
+     * up as advice.
+     */
+    const message =
+      error instanceof CrawlError
+        ? error.message
+        : `The crawl failed: ${error instanceof Error ? error.message : String(error)}`;
+
+    await logJob(jobId, { level: "error", stage: "crawl", message });
+    await settleRun(jobId, "failed", message);
   }
 }
 
