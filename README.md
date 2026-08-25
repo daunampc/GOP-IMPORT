@@ -486,9 +486,12 @@ nothing.
 
 ## Source data
 
-**CSV, and only CSV.** Four formats: Shopify/Shopbase (grouped by `Handle`),
-WooCommerce (`Type=variation` rows pointing at `Parent`), Etsy (the Download
-Listings export) and **Custom** — any CSV at all, with the columns named by hand.
+**A file, or a shop.** The file path takes four CSV formats: Shopify/Shopbase
+(grouped by `Handle`), WooCommerce (`Type=variation` rows pointing at `Parent`),
+Etsy (the Download Listings export) and **Custom** — any CSV at all, with the
+columns named by hand. The other path is the crawler, described at the end of
+this section: it reads a Shopify storefront directly instead of a file. Both
+arrive at the same wizard as the same `Product[]`.
 
 The format is worked out **at step one, in the browser**, from the file's header
 line alone: 64KB read locally, no upload and no parse. The detected answer is
@@ -542,10 +545,14 @@ steps and the `idempotency_key` that keeps a re-import from duplicating products
 run completely unmodified. A crawl feeds the wizard at `/import?crawl=<jobId>`
 exactly the way a CSV feeds it at the drop zone.
 
-Prices are decoded from Shopify's integer cents into a decimal string by
-hand-rolled string arithmetic (`lib/sources/crawl/money.ts`), not by dividing
-floats — `Number("18.005") * 100` is not `1800`, and an operator-entered exchange
-rate compounds that error further. The module refuses to parse a price it cannot
+Prices are read into a decimal string by hand-rolled string arithmetic
+(`lib/sources/crawl/money.ts`), never by floating-point division. `/products.json`
+quotes a decimal (`"18.00"`) — it is the AJAX `/products/{handle}.js` endpoint
+that sends integer cents, and reading one as the other would be a price wrong by
+a hundred — so the string is converted to the currency's smallest unit and back.
+That is what makes `"25400.00"` in a currency with no minor unit come out as
+`25400` rather than as a fraction of itself, and an operator-entered exchange
+rate multiplies whatever error is already there. The module refuses to parse a price it cannot
 represent exactly rather than silently rounding it.
 
 Platform auto-detection and the WooCommerce/Magento/Etsy/generic adapters are
