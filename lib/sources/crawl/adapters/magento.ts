@@ -14,8 +14,7 @@
  */
 
 import type { Product } from "../../../gop-client";
-import { convert, fromDecimal, fromMinorUnits } from "../money";
-import { minorUnitFor } from "../money";
+import { convert, fromDecimal, fromMinorUnits, lessThan, minorUnitFor } from "../money";
 import { CrawlError, type CrawlAdapter, type CrawlContext, type DetectInput } from "../types";
 
 const PAGE_SIZE = 50;
@@ -68,24 +67,21 @@ export interface MagentoMapOptions {
  * this crawler is a decimal string precisely so that never happens. A value
  * carrying more decimals than its currency allows is refused there, which skips
  * one product rather than publishing a rounded price.
+ *
+ * `minorUnit` is resolved once by the caller from `regular_price.currency` and
+ * passed in here, rather than being read off `money.currency` again — both
+ * prices come from the same `price_range.minimum_price`, so there is exactly
+ * one currency to resolve, not two.
  */
-function price(money: MagentoMoney, options: MagentoMapOptions): string {
+function price(money: MagentoMoney, minorUnit: number, options: MagentoMapOptions): string {
   if (money.value === null || !Number.isFinite(money.value)) {
     throw new CrawlError(`Magento sent a price this crawler cannot read: ${String(money.value)}.`);
   }
 
-  const minorUnit = minorUnitFor(money.currency);
   const decimal = fromMinorUnits(fromDecimal(String(money.value), minorUnit), minorUnit);
 
   return options.fxRate === null ? decimal : convert(decimal, options.fxRate, minorUnit);
 }
-
-/**
- * Magento names the currency on every price, so the exponent comes from the
- * product rather than from the crawl's setting — the same rule the WooCommerce
- * adapter follows for `currency_minor_unit`.
- */
-// `minorUnitFor` is imported from `../money` — see Task 3 Step 0.
 
 export function toProduct(raw: MagentoItem, options: MagentoMapOptions): Product {
   const gallery = raw.media_gallery.map((entry) => entry.url);
@@ -98,8 +94,13 @@ export function toProduct(raw: MagentoItem, options: MagentoMapOptions): Product
     options.imagesPerProduct,
   );
 
-  const regular = price(raw.price_range.minimum_price.regular_price, options);
-  const final = price(raw.price_range.minimum_price.final_price, options);
+  // Magento names the currency on every price, but both prices here come from
+  // the same `price_range.minimum_price` — so the exponent is resolved once,
+  // from `regular_price`, and reused for `final_price` rather than trusting
+  // two potentially different sources for what should be one currency.
+  const minorUnit = minorUnitFor(raw.price_range.minimum_price.regular_price.currency);
+  const regular = price(raw.price_range.minimum_price.regular_price, minorUnit, options);
+  const final = price(raw.price_range.minimum_price.final_price, minorUnit, options);
 
   const description = raw.description?.html ?? "";
   const shortDescription = raw.short_description?.html ?? "";
@@ -111,7 +112,7 @@ export function toProduct(raw: MagentoItem, options: MagentoMapOptions): Product
     description: description === "" ? undefined : description,
     short_description: shortDescription === "" ? undefined : shortDescription,
     type: "simple",
-    ...(Number(final) < Number(regular)
+    ...(lessThan(final, regular, minorUnit)
       ? { regular_price: regular, sale_price: final }
       : { regular_price: regular }),
     instock: raw.stock_status !== "OUT_OF_STOCK",

@@ -966,6 +966,9 @@ function magentoTests(): void {
   const plate = magentoToProduct(items[1], opts);
   check("out of stock", plate.instock === false);
   check("no sale when equal", plate.sale_price === undefined);
+  // A final_price equal to regular_price is not a discount — lessThan(final,
+  // regular, ...) must be false, not just "close enough" under Number().
+  check("regular price kept when equal", plate.regular_price === "8.00", String(plate.regular_price));
   check("empty description omitted", plate.description === undefined);
   check("no images", JSON.stringify(plate.images) === "[]");
 
