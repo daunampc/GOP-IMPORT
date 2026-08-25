@@ -103,7 +103,10 @@ export function CrawlForm() {
               />
             </Field>
 
-            <Field label="Platform" hint="Detection reads the home page once to work out what a shop runs.">
+            <Field
+              label="Platform"
+              hint="Only “Detect automatically” costs an extra request, to read the home page once and work out what the shop runs. Choosing a platform by hand skips it."
+            >
               {/*
                * No `label` here: `Field` already renders the visible "Platform"
                * label, and `Segmented` turns its own `label` prop into an

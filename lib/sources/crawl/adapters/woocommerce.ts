@@ -11,7 +11,13 @@
 
 import type { Product, ProductVariation } from "../../../gop-client";
 import { convert, fromMinorUnits, lessThan } from "../money";
-import { CrawlError, type CrawlAdapter, type CrawlContext, type DetectInput } from "../types";
+import {
+  CrawlError,
+  type CrawlAdapter,
+  type CrawlContext,
+  type CrawlLogLine,
+  type DetectInput,
+} from "../types";
 
 /** The Store API's own maximum. Asking for more silently returns 100. */
 const PAGE_SIZE = 100;
@@ -58,6 +64,26 @@ export interface WooProduct {
   variations: Array<{ id: number; attributes: Array<{ name: string; value: string }> }>;
 }
 
+/**
+ * One variation record, fetched from `/wp-json/wc/store/v1/products/{id}`.
+ *
+ * A different wire shape from `WooProduct`, not the same one reused: a parent
+ * listing's `attributes` carries `terms` (every value the attribute can take
+ * across the whole product), while a variation's `attributes` carries the single
+ * `{name, value}` pair this variation actually is. They used to share
+ * `WooProduct`'s interface, coerced at the one place they were told apart with a
+ * double cast — which hid the fact that they are not interchangeable from the
+ * compiler exactly where that distinction mattered.
+ */
+export interface WooVariation {
+  id: number;
+  sku: string | null;
+  prices: WooPrices;
+  is_in_stock: boolean;
+  images: Array<{ id: number; src: string }>;
+  attributes: Array<{ name: string; value: string }>;
+}
+
 export interface WooMapOptions {
   imagesPerProduct: number;
   fxRate: number | null;
@@ -99,22 +125,61 @@ function imagesOf(raw: WooProduct, options: WooMapOptions): string[] {
   return raw.images.map((image) => image.src).slice(0, options.imagesPerProduct);
 }
 
-function variationOf(raw: WooProduct, options: WooMapOptions): ProductVariation {
+function variationOf(raw: WooVariation, options: WooMapOptions): ProductVariation {
   return {
     sku: raw.sku ?? undefined,
     ...priceFields(raw.prices, options),
     instock: raw.is_in_stock,
-    attributes: (raw.attributes as unknown as Array<{ name: string; value: string }>).map(
-      (attribute) => ({ name: attribute.name, value: attribute.value }),
-    ),
+    attributes: raw.attributes.map((attribute) => ({
+      name: attribute.name,
+      value: attribute.value,
+    })),
     image: raw.images[0]?.src,
   };
 }
 
+/**
+ * Every variation that can actually be priced, in the same order they were
+ * given.
+ *
+ * `readVariations` already skips a variation gracefully when its request fails
+ * or its JSON is malformed — this is the same treatment for the failure that
+ * surfaces later: `variationOf` → `priceFields` → `fromMinorUnits` can throw
+ * `CrawlMoneyError` for a variation whose price this crawler cannot represent.
+ * Without this, one unrepresentable variation price would escape from inside
+ * `variations.map(...)` and take the whole product down with it, dropping every
+ * OTHER variation that read just fine.
+ */
+function readableVariations(
+  variations: WooVariation[],
+  parentName: string,
+  options: WooMapOptions,
+  log?: (line: CrawlLogLine) => void,
+): ProductVariation[] {
+  const out: ProductVariation[] = [];
+
+  for (const variation of variations) {
+    try {
+      out.push(variationOf(variation, options));
+    } catch (error) {
+      log?.({
+        level: "warn",
+        message:
+          `Variation ${variation.id} of "${parentName}" has a price this crawler cannot ` +
+          `represent, and was skipped: ${error instanceof Error ? error.message : String(error)}`,
+        detail: { wooId: variation.id },
+      });
+    }
+  }
+
+  return out;
+}
+
 export function toProduct(
   raw: WooProduct,
-  variations: WooProduct[],
+  variations: WooVariation[],
   options: WooMapOptions,
+  log?: (line: CrawlLogLine) => void,
 ): Product {
   const base: Product = {
     name: raw.name,
@@ -127,10 +192,14 @@ export function toProduct(
     mode_import: "full_data",
   };
 
+  const readable = raw.type === "variable" ? readableVariations(variations, raw.name, options, log) : [];
+
   // A variable product whose variations could not be read is published as a
   // simple one at the parent's price, rather than as a variable product with no
-  // variations — which WooCommerce shows as unbuyable.
-  if (raw.type !== "variable" || variations.length === 0) {
+  // variations — which WooCommerce shows as unbuyable. That includes a product
+  // left with none of its variations readable, exactly as if none had ever
+  // been fetched.
+  if (raw.type !== "variable" || readable.length === 0) {
     return {
       ...base,
       type: "simple",
@@ -153,7 +222,7 @@ export function toProduct(
         visible: true,
         used_for_variation: true,
       })),
-    variations: variations.map((variation) => variationOf(variation, options)),
+    variations: readable,
   };
 }
 
@@ -167,7 +236,17 @@ export const wooAdapter: CrawlAdapter = {
     if (/wp-content|wp-includes/i.test(input.html)) {
       score += 0.4;
     }
-    if (/woocommerce/i.test(input.html)) {
+
+    /*
+     * Structural, not a prose mention. A bare case-insensitive `/woocommerce/`
+     * anywhere in the html used to be worth 0.5 on its own — enough by itself
+     * to cross DETECT_THRESHOLD — so a page that merely TALKS about WooCommerce
+     * (a platform-comparison article, a migration blog post) classified as a
+     * WooCommerce shop. A request into the plugin's own asset directory only
+     * appears when the page is actually running WooCommerce's front-end code,
+     * the same kind of shape Magento's detector already requires.
+     */
+    if (/wp-content\/plugins\/woocommerce\//i.test(input.html)) {
       score += 0.5;
     }
     if (/<meta name="generator" content="WooCommerce/i.test(input.html)) {
@@ -220,12 +299,17 @@ export const wooAdapter: CrawlAdapter = {
 
         try {
           const variations =
-            raw.type === "variable" ? await readVariations(raw, ctx) : ([] as WooProduct[]);
+            raw.type === "variable" ? await readVariations(raw, ctx) : ([] as WooVariation[]);
 
-          yield toProduct(raw, variations, {
-            imagesPerProduct: ctx.imagesPerProduct,
-            fxRate: ctx.fxRate,
-          });
+          yield toProduct(
+            raw,
+            variations,
+            {
+              imagesPerProduct: ctx.imagesPerProduct,
+              fxRate: ctx.fxRate,
+            },
+            ctx.log,
+          );
           sent++;
         } catch (error) {
           ctx.log({
@@ -251,7 +335,7 @@ export const wooAdapter: CrawlAdapter = {
  * A variation that cannot be read is dropped with a warning rather than
  * published at the parent's price, which would be a made-up number.
  */
-async function readVariations(raw: WooProduct, ctx: CrawlContext): Promise<WooProduct[]> {
+async function readVariations(raw: WooProduct, ctx: CrawlContext): Promise<WooVariation[]> {
   const wanted = raw.variations.slice(0, MAX_VARIATIONS);
 
   if (raw.variations.length > MAX_VARIATIONS) {
@@ -262,7 +346,7 @@ async function readVariations(raw: WooProduct, ctx: CrawlContext): Promise<WooPr
     });
   }
 
-  const out: WooProduct[] = [];
+  const out: WooVariation[] = [];
 
   for (const entry of wanted) {
     if (ctx.signal.aborted) {
@@ -281,7 +365,7 @@ async function readVariations(raw: WooProduct, ctx: CrawlContext): Promise<WooPr
     }
 
     try {
-      out.push(JSON.parse(response.body) as WooProduct);
+      out.push(JSON.parse(response.body) as WooVariation);
     } catch {
       ctx.log({
         level: "warn",

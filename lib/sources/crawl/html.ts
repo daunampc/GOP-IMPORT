@@ -32,29 +32,50 @@ export function jsonLdBlocks(html: string): unknown[] {
 }
 
 /**
+ * How much of one `<meta>` tag is scanned for its attributes.
+ *
+ * Real tags are a few hundred bytes at most; this is generous headroom above
+ * that, not a tight fit. The bound exists so a single crafted tag cannot make
+ * the attribute search below scan an entire (up to 8MB) response.
+ */
+const MAX_META_TAG_LENGTH = 2048;
+
+/**
  * The `content` of a `<meta>` whose `property` or `name` is `key`.
  *
  * Both attributes are accepted because Open Graph specifies `property` and a
  * great many pages write `name` anyway.
+ *
+ * Matched in two passes rather than one regex over the whole page. The
+ * attribute patterns are `<meta\b[^>]*LITERAL[^>]*content=...` — two unbounded
+ * `[^>]*` runs either side of the literal — and run directly against a whole
+ * page body, a single `<meta>` tag with one very long attribute value and no
+ * other `>` anywhere in the response (this adapter feeds it arbitrary
+ * third-party HTML, and calls this up to five times per page) makes that
+ * search scan the whole blob before concluding the literal does not match.
+ * Extracting short, bounded `<meta ...>` segments first and matching
+ * attributes only within each segment keeps every regex's backtracking
+ * confined to `MAX_META_TAG_LENGTH` bytes, independent of the page size.
  */
 export function metaContent(html: string, key: string): string | null {
   const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
   const patterns = [
-    new RegExp(
-      `<meta\\b[^>]*(?:property|name)=["']${escaped}["'][^>]*content=["']([^"']*)["']`,
-      "i",
-    ),
-    new RegExp(
-      `<meta\\b[^>]*content=["']([^"']*)["'][^>]*(?:property|name)=["']${escaped}["']`,
-      "i",
-    ),
+    new RegExp(`(?:property|name)=["']${escaped}["'][^>]*content=["']([^"']*)["']`, "i"),
+    new RegExp(`content=["']([^"']*)["'][^>]*(?:property|name)=["']${escaped}["']`, "i"),
   ];
 
-  for (const pattern of patterns) {
-    const match = pattern.exec(html);
-    if (match !== null) {
-      return decodeEntities(match[1]);
+  const tagPattern = new RegExp(`<meta\\b[^>]{0,${MAX_META_TAG_LENGTH}}>`, "gi");
+
+  let tagMatch: RegExpExecArray | null;
+  while ((tagMatch = tagPattern.exec(html)) !== null) {
+    const tag = tagMatch[0];
+
+    for (const pattern of patterns) {
+      const match = pattern.exec(tag);
+      if (match !== null) {
+        return decodeEntities(match[1]);
+      }
     }
   }
 

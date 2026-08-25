@@ -24,12 +24,18 @@ import {
 } from "../lib/sources/crawl/money";
 import { CRAWLER_USER_AGENT, parseRobots } from "../lib/sources/crawl/robots";
 import { fullSizeImage, toProduct, type ShopifyProduct } from "../lib/sources/crawl/adapters/shopify";
-import { toProduct as wooToProduct, type WooProduct } from "../lib/sources/crawl/adapters/woocommerce";
+import {
+  toProduct as wooToProduct,
+  type WooProduct,
+  type WooVariation,
+} from "../lib/sources/crawl/adapters/woocommerce";
 import { toProduct as magentoToProduct, type MagentoItem } from "../lib/sources/crawl/adapters/magento";
 import { jsonLdBlocks, metaContent, sitemapUrls } from "../lib/sources/crawl/html";
-import { productFromJsonLd, productFromMeta } from "../lib/sources/crawl/adapters/generic";
+import { discover, productFromJsonLd, productFromMeta } from "../lib/sources/crawl/adapters/generic";
 import { serverTransport, sleep } from "../lib/sources/crawl/transport";
 import { crawlShop, MAX_CRAWL_DELAY_MS } from "../lib/sources/crawl";
+import { crawlOptionsSchema, minorUnitFor as reExportedMinorUnitFor } from "../lib/crawl-options";
+import type { CrawlContext } from "../lib/sources/crawl/types";
 
 let passed = 0;
 let failed = 0;
@@ -286,7 +292,7 @@ function wooTests(): void {
   console.log("\nWooCommerce mapping");
 
   const products = JSON.parse(fixture("woo-store-api.json")) as WooProduct[];
-  const variation = JSON.parse(fixture("woo-variation.json")) as WooProduct;
+  const variation = JSON.parse(fixture("woo-variation.json")) as WooVariation;
   const opts = { imagesPerProduct: 10, fxRate: null };
 
   const tote = wooToProduct(products[0], [], opts);
@@ -326,6 +332,40 @@ function wooTests(): void {
     "variation attributes",
     JSON.stringify(shirt.variations?.[0].attributes) === '[{"name":"Size","value":"S"}]',
     JSON.stringify(shirt.variations?.[0].attributes),
+  );
+
+  /*
+   * One variation with an unrepresentable price must not take the whole
+   * product down with it — `readableVariations` drops it and keeps the rest,
+   * the same treatment `readVariations` already gives a failed request or
+   * malformed JSON.
+   */
+  const unrepresentable = JSON.parse(fixture("woo-variation.json")) as WooVariation;
+  unrepresentable.id = 46;
+  unrepresentable.sku = "SHIRT-M";
+  unrepresentable.attributes = [{ name: "Size", value: "M" }];
+  unrepresentable.prices = { ...unrepresentable.prices, regular_price: "59.5" };
+
+  const warnings: string[] = [];
+  const mixed = wooToProduct(products[1], [variation, unrepresentable], opts, (line) =>
+    warnings.push(line.message),
+  );
+
+  check("mixed variations: product still publishes as variable", mixed.type === "variable", mixed.type);
+  check(
+    "mixed variations: only the readable one is carried",
+    (mixed.variations ?? []).length === 1,
+    JSON.stringify(mixed.variations),
+  );
+  check(
+    "mixed variations: it is the good one",
+    mixed.variations?.[0].sku === "SHIRT-S",
+    String(mixed.variations?.[0].sku),
+  );
+  check(
+    "mixed variations: a warning names the dropped one",
+    warnings.some((message) => message.includes("46")),
+    JSON.stringify(warnings),
   );
 
   // A zero-decimal currency must not be divided by a hundred.
@@ -803,6 +843,72 @@ async function orchestratorTests(): Promise<void> {
   check("auto detected shopify", detected.platform === "shopify", detected.platform);
   check("the homepage was read once", auto.asked.filter((u) => u.endsWith("/")).length === 1);
 
+  /*
+   * The ordering finding: for `platform: "auto"`, detection's own fetch of `/`
+   * is a request to this host, made right after robots.txt — so the
+   * Crawl-delay floor has to be raised BEFORE that fetch, not after adapter
+   * selection. `events` interleaves both `raiseDelayTo` calls and fetched
+   * paths in the order they actually happened, which a transport exposing
+   * only two separate arrays could not prove.
+   */
+  const events: string[] = [];
+  const orderedTransport = {
+    async fetchText(url: string) {
+      const path = new URL(url).pathname;
+      events.push(`fetch ${path}`);
+
+      if (path === "/robots.txt") {
+        return {
+          status: 200,
+          contentType: "text/plain",
+          body: "User-agent: *\nCrawl-delay: 2",
+          headers: {},
+        };
+      }
+      if (path === "/") {
+        return {
+          status: 200,
+          contentType: "text/html",
+          body: '<html><script src="https://cdn.shopify.com/x.js"></script></html>',
+          headers: {},
+        };
+      }
+      if (path === "/products.json") {
+        const page = new URL(url).searchParams.get("page");
+        return {
+          status: 200,
+          contentType: "application/json",
+          body: page === "1" ? fixture("shopify-products.json") : '{"products":[]}',
+          headers: {},
+        };
+      }
+      return { status: 404, contentType: "text/plain", body: "", headers: {} };
+    },
+    raiseDelayTo(ms: number) {
+      events.push(`raiseDelayTo ${ms}`);
+    },
+  };
+
+  await crawlShop({
+    shopUrl: "https://example.test",
+    platform: "auto",
+    limit: 10,
+    imagesPerProduct: 5,
+    minorUnit: 2,
+    fxRate: null,
+    signal: new AbortController().signal,
+    log: () => {},
+    transport: orderedTransport,
+  });
+
+  const delayIndex = events.indexOf("raiseDelayTo 2000");
+  const homepageIndex = events.indexOf("fetch /");
+  check(
+    "the Crawl-delay floor is raised before detection fetches the home page",
+    delayIndex !== -1 && homepageIndex !== -1 && delayIndex < homepageIndex,
+    JSON.stringify(events),
+  );
+
   // Nothing recognisable falls back to the generic adapter rather than refusing.
   const unknown = homepageTransport("<html><body>a shop</body></html>");
   await refusesAsync(
@@ -1063,7 +1169,7 @@ function magentoTests(): void {
   check("fx applied", converted.regular_price === "609600.00", String(converted.regular_price));
 }
 
-function genericTests(): void {
+async function genericTests(): Promise<void> {
   console.log("\nGeneric (schema.org)");
 
   const productHtml = fixture("jsonld-product.html");
@@ -1094,6 +1200,22 @@ function genericTests(): void {
   check("meta by property", metaContent(ogHtml, "og:title") === "Canvas Belt");
   check("missing meta is null", metaContent(ogHtml, "og:description") === null);
 
+  /*
+   * `metaContent` extracts bounded `<meta ...>` segments before matching
+   * attributes, so a single crafted tag with a very long attribute value and
+   * no other `>` in the response cannot make it scan the whole page. A tag
+   * past the bound simply does not match — that is the point, not a bug —
+   * and a normal tag after it must still be found.
+   */
+  const tooLongMeta = `<meta property="og:title" content="${"x".repeat(3000)}">`;
+  check("a meta tag past the bound does not match", metaContent(tooLongMeta, "og:title") === null);
+
+  const afterTooLong = `${tooLongMeta}<meta property="og:title" content="Found Me">`;
+  check(
+    "a normal tag after a too-long one is still found",
+    metaContent(afterTooLong, "og:title") === "Found Me",
+  );
+
   const belt = productFromMeta(ogHtml, "https://shop.example/belt", opts);
   check("og name", belt?.name === "Canvas Belt", String(belt?.name));
   check("og price", belt?.regular_price === "18.50", String(belt?.regular_price));
@@ -1111,6 +1233,110 @@ function genericTests(): void {
       '["https://shop.example/sitemap-products.xml"]',
   );
   check("sitemap product urls", sitemapUrls(fixture("sitemap-products.xml")).length === 3);
+
+  /*
+   * A child sitemap of a <sitemapindex> is a discovered url exactly like a
+   * product page — only the top-level /sitemap.xml is checked against
+   * robots.txt before this adapter starts, so `discover` itself has to consult
+   * `ctx.isAllowed` for each child, or a `Disallow` naming one is silently
+   * ignored.
+   */
+  const sitemapIndexXml = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    "<sitemap><loc>https://shop.example/sitemap-products.xml</loc></sitemap>",
+    "<sitemap><loc>https://shop.example/sitemap_drafts.xml</loc></sitemap>",
+    "</sitemapindex>",
+  ].join("\n");
+
+  const fetchedChildren: string[] = [];
+  const discoverCtx: CrawlContext = {
+    shopUrl: new URL("https://shop.example"),
+    transport: {
+      async fetchText(url: string) {
+        const path = new URL(url).pathname;
+
+        if (path === "/sitemap.xml") {
+          return { status: 200, contentType: "application/xml", body: sitemapIndexXml, headers: {} };
+        }
+
+        fetchedChildren.push(path);
+
+        if (path === "/sitemap-products.xml") {
+          return {
+            status: 200,
+            contentType: "application/xml",
+            body: fixture("sitemap-products.xml"),
+            headers: {},
+          };
+        }
+
+        return { status: 200, contentType: "application/xml", body: "<urlset></urlset>", headers: {} };
+      },
+    },
+    limit: 100,
+    imagesPerProduct: 10,
+    minorUnit: 2,
+    fxRate: null,
+    log: () => {},
+    signal: new AbortController().signal,
+    isAllowed: (pathname: string) => pathname !== "/sitemap_drafts.xml",
+  };
+
+  const discovered = await discover(discoverCtx);
+
+  check(
+    "a disallowed child sitemap is never fetched",
+    !fetchedChildren.includes("/sitemap_drafts.xml"),
+    JSON.stringify(fetchedChildren),
+  );
+  check(
+    "an allowed sibling child sitemap is still read",
+    discovered.length === 3,
+    JSON.stringify(discovered),
+  );
+}
+
+function crawlOptionsTests(): void {
+  console.log("\ncrawlOptionsSchema");
+
+  // The stored-run replay case: a run's options are parsed back out of
+  // Postgres JSON months after it ran, and a named platform must survive that
+  // round trip unchanged rather than being coerced back to "auto".
+  const stored = crawlOptionsSchema.parse({
+    shopUrl: "https://shop.example",
+    platform: "shopify",
+  });
+  check("a stored platform survives parsing", stored.platform === "shopify", stored.platform);
+
+  // A blob with no `platform` at all — an even older stored run, from before
+  // this field existed — defaults to "auto" rather than being refused.
+  const defaulted = crawlOptionsSchema.parse({ shopUrl: "https://shop.example" });
+  check(
+    "a missing platform defaults to auto",
+    defaulted.platform === "auto",
+    defaulted.platform,
+  );
+
+  // "etsy" is schema-valid even though nothing in this build can run it — the
+  // worker refuses it at run time (see `adapterNamed` in
+  // lib/sources/crawl/index.ts), not the schema. A run stored before Etsy was
+  // disabled, or one that never got past validation, must still parse.
+  const etsy = crawlOptionsSchema.parse({ shopUrl: "https://shop.example", platform: "etsy" });
+  check("etsy still parses as schema-valid", etsy.platform === "etsy", etsy.platform);
+
+  refuses(
+    "an invalid shopUrl is rejected",
+    () => crawlOptionsSchema.parse({ shopUrl: "not a url" }),
+    /web address/i,
+  );
+
+  // `lib/crawl-options.ts` re-exports `minorUnitFor` rather than a Client
+  // Component reaching into `lib/sources/crawl/money.ts` directly, and that
+  // re-export is what actually gets imported — so it is asserted here, through
+  // the same path a Client Component uses, not through the original module.
+  check("VND has no minor unit, through the re-export", reExportedMinorUnitFor("VND") === 0);
+  check("USD has two, through the re-export", reExportedMinorUnitFor("USD") === 2);
 }
 
 async function main(): Promise<void> {
@@ -1119,7 +1345,8 @@ async function main(): Promise<void> {
   shopifyTests();
   wooTests();
   magentoTests();
-  genericTests();
+  await genericTests();
+  crawlOptionsTests();
   await transportTests();
   await orchestratorTests();
   await wooOrchestratorTests();

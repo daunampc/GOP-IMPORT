@@ -132,6 +132,40 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
       );
     }
 
+    /*
+     * One transport for the whole crawl, and its floor is raised rather than a
+     * second one being built.
+     *
+     * robots.txt is itself a request to this host, so a fresh transport for the
+     * products would start a fresh per-host clock and let the first product
+     * request follow robots.txt instantly — the one gap the delay is least
+     * entitled to skip, since it is the gap the site just told us about.
+     *
+     * Raised HERE, before an adapter is even chosen — not after. Detection
+     * fetches `/` for a `platform: "auto"` run, and that fetch is itself a
+     * request to this host, made right after robots.txt. Raising the floor
+     * after adapter selection would let that request go out at the default
+     * floor instead of the site's declared `Crawl-delay`, reopening on the
+     * detection fetch the exact gap this raise exists to close on the first
+     * product request.
+     */
+    if (rules.crawlDelayMs !== null && "raiseDelayTo" in transport) {
+      const cappedDelayMs = Math.min(MAX_CRAWL_DELAY_MS, rules.crawlDelayMs);
+
+      if (rules.crawlDelayMs > MAX_CRAWL_DELAY_MS) {
+        input.log({
+          level: "warn",
+          message:
+            `${shopUrl.host} asked for a ${rules.crawlDelayMs}ms Crawl-delay; capped at ` +
+            `${MAX_CRAWL_DELAY_MS}ms so it cannot hold one of this worker's four job slots ` +
+            "against every other account's imports.",
+          detail: { requestedMs: rules.crawlDelayMs, cappedMs: cappedDelayMs },
+        });
+      }
+
+      (transport as ServerTransport).raiseDelayTo(cappedDelayMs);
+    }
+
     // Detection fetches `/`, so it faces the same robots.txt check as every
     // other request this crawler makes — a site that disallows its own home
     // page cannot be auto-detected, and the operator is told to choose by hand.
@@ -155,32 +189,6 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
             "to override that here.",
         );
       }
-    }
-
-    /*
-     * One transport for the whole crawl, and its floor is raised rather than a
-     * second one being built.
-     *
-     * robots.txt is itself a request to this host, so a fresh transport for the
-     * products would start a fresh per-host clock and let the first product
-     * request follow robots.txt instantly — the one gap the delay is least
-     * entitled to skip, since it is the gap the site just told us about.
-     */
-    if (rules.crawlDelayMs !== null && "raiseDelayTo" in transport) {
-      const cappedDelayMs = Math.min(MAX_CRAWL_DELAY_MS, rules.crawlDelayMs);
-
-      if (rules.crawlDelayMs > MAX_CRAWL_DELAY_MS) {
-        input.log({
-          level: "warn",
-          message:
-            `${shopUrl.host} asked for a ${rules.crawlDelayMs}ms Crawl-delay; capped at ` +
-            `${MAX_CRAWL_DELAY_MS}ms so it cannot hold one of this worker's four job slots ` +
-            "against every other account's imports.",
-          detail: { requestedMs: rules.crawlDelayMs, cappedMs: cappedDelayMs },
-        });
-      }
-
-      (transport as ServerTransport).raiseDelayTo(cappedDelayMs);
     }
 
     input.log({
@@ -272,6 +280,11 @@ async function detectPlatform(
 
   if (best.score < DETECT_THRESHOLD) {
     const generic = ADAPTERS.find((adapter) => adapter.name === "generic");
+    // Unreachable today — `ADAPTERS` above statically includes `genericAdapter`.
+    // Kept as a guard against a future edit to `ADAPTERS` that drops it (or
+    // renames it) without updating this fallback, which would otherwise fail
+    // with a `find` returning `undefined` deep inside `.name` access instead of
+    // a message that says what actually went wrong.
     if (generic === undefined) {
       throw new CrawlError("No adapter could read this shop.");
     }

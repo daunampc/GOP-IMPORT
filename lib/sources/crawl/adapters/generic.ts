@@ -217,8 +217,8 @@ export const genericAdapter: CrawlAdapter = {
   },
 };
 
-/** Sitemap, then any sitemaps it indexes. */
-async function discover(ctx: CrawlContext): Promise<string[]> {
+/** Sitemap, then any sitemaps it indexes. Exported so the test suite can drive it directly. */
+export async function discover(ctx: CrawlContext): Promise<string[]> {
   const root = new URL("/sitemap.xml", ctx.shopUrl);
   const response = await ctx.transport.fetchText(root.toString());
 
@@ -238,6 +238,17 @@ async function discover(ctx: CrawlContext): Promise<string[]> {
   for (const child of first.slice(0, MAX_SITEMAPS)) {
     if (ctx.signal.aborted || out.length >= MAX_URLS) {
       break;
+    }
+
+    // A child sitemap is a discovered url exactly like a product page, and
+    // `ctx.isAllowed` exists for exactly this case — only the top-level
+    // `/sitemap.xml` is checked against `robotsPaths` before this adapter
+    // starts, so a site that disallows one of its own child sitemaps (say
+    // `/sitemap_drafts.xml`) would otherwise never have that rule consulted.
+    const childPath = new URL(child).pathname;
+    if (!ctx.isAllowed(childPath)) {
+      ctx.log({ level: "warn", message: `robots.txt disallows ${childPath}; skipped.` });
+      continue;
     }
 
     const childResponse = await ctx.transport.fetchText(child);
