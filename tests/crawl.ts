@@ -270,6 +270,105 @@ async function transportTests(): Promise<void> {
     () => transport.fetchText("file:///etc/passwd"),
     /http|scheme|refuse|not fetch/i,
   );
+
+  /** A fetch that replays scripted responses and records what was asked for. */
+  function scripted(steps: Array<{ status: number; location?: string; body?: string }>) {
+    const asked: string[] = [];
+    let index = 0;
+
+    const impl = async (input: unknown): Promise<Response> => {
+      asked.push(String(input));
+      const step = steps[Math.min(index, steps.length - 1)];
+      index++;
+
+      const headers = new Headers({ "content-type": "application/json" });
+      if (step.location !== undefined) {
+        headers.set("location", step.location);
+      }
+
+      return new Response(step.body ?? "{}", { status: step.status, headers });
+    };
+
+    return { asked, impl: impl as unknown as typeof fetch };
+  }
+
+  /*
+   * THE second-hop test. lib/outbound-url.ts calls refusing this the reason the
+   * resolving guard exists, and following redirects inside fetch would skip it.
+   */
+  const hop = scripted([{ status: 302, location: "http://169.254.169.254/latest/meta-data/" }]);
+  await refusesAsync(
+    "a redirect to the metadata endpoint",
+    () =>
+      serverTransport({
+        signal: new AbortController().signal,
+        delayMs: 0,
+        fetchImpl: hop.impl,
+      }).fetchText("http://93.184.216.34/products.json"),
+    /private|link-local|refuse|not fetch/i,
+  );
+  check("the blocked hop was never fetched", hop.asked.length === 1, JSON.stringify(hop.asked));
+
+  const priv = scripted([{ status: 301, location: "http://10.0.0.5/products.json" }]);
+  await refusesAsync(
+    "a redirect into a private range",
+    () =>
+      serverTransport({
+        signal: new AbortController().signal,
+        delayMs: 0,
+        fetchImpl: priv.impl,
+      }).fetchText("http://93.184.216.34/products.json"),
+    /private|refuse|not fetch/i,
+  );
+
+  const ok = scripted([
+    { status: 302, location: "http://203.0.113.9/products.json" },
+    { status: 200, body: '{"products":[]}' },
+  ]);
+  const followed = await serverTransport({
+    signal: new AbortController().signal,
+    delayMs: 0,
+    fetchImpl: ok.impl,
+  }).fetchText("http://93.184.216.34/products.json");
+  check("an allowed redirect is followed", followed.status === 200, String(followed.status));
+  check("the redirect body is returned", followed.body === '{"products":[]}', followed.body);
+  check("both hops were fetched", ok.asked.length === 2, JSON.stringify(ok.asked));
+
+  const loop = scripted([{ status: 302, location: "http://203.0.113.9/again" }]);
+  await refusesAsync(
+    "a redirect loop stops",
+    () =>
+      serverTransport({
+        signal: new AbortController().signal,
+        delayMs: 0,
+        fetchImpl: loop.impl,
+      }).fetchText("http://93.184.216.34/products.json"),
+    /redirected more than/i,
+  );
+
+  // 404 has to reach the adapter: Shopify's adapter reads it as "products.json is off".
+  const missing = scripted([{ status: 404, body: "not found" }]);
+  const gone = await serverTransport({
+    signal: new AbortController().signal,
+    delayMs: 0,
+    fetchImpl: missing.impl,
+  }).fetchText("http://93.184.216.34/products.json");
+  check("404 is returned, not retried", gone.status === 404, String(gone.status));
+  check("404 was fetched once", missing.asked.length === 1, JSON.stringify(missing.asked));
+
+  // The size ceiling, with a body deliberately past a tiny limit.
+  const big = scripted([{ status: 200, body: "x".repeat(5000) }]);
+  await refusesAsync(
+    "a body past the ceiling",
+    () =>
+      serverTransport({
+        signal: new AbortController().signal,
+        delayMs: 0,
+        maxBytes: 1000,
+        fetchImpl: big.impl,
+      }).fetchText("http://93.184.216.34/products.json"),
+    /MB|more than/i,
+  );
 }
 
 async function main(): Promise<void> {
