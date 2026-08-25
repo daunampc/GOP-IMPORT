@@ -24,6 +24,11 @@ export interface ServerTransportOptions {
    * network. Production leaves it unset.
    */
   fetchImpl?: typeof fetch;
+  /**
+   * Substituted by the tests, so the retry schedule can be asserted without
+   * waiting it out. Production leaves it unset and gets `BACKOFF_MS`.
+   */
+  backoffMs?: number[];
 }
 
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
@@ -76,6 +81,7 @@ export function serverTransport(options: ServerTransportOptions): CrawlTransport
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const doFetch = options.fetchImpl ?? fetch;
+  const backoff = options.backoffMs ?? BACKOFF_MS;
 
   /** When each host may next be asked for something. */
   const nextAllowedAt = new Map<string, number>();
@@ -146,6 +152,26 @@ export function serverTransport(options: ServerTransportOptions): CrawlTransport
 
       const location = response.headers.get("location");
 
+      /*
+       * A rate-limit answer is a signal, not content.
+       *
+       * Returned before the body is read, and that ordering is the fix for a
+       * real bug rather than an optimisation: reading first meant a 429 whose
+       * error page happened to exceed the size ceiling threw from in here, and
+       * the throw reached the caller's non-retryable branch before anything had
+       * looked at the status. A 429 then failed instantly instead of backing
+       * off, which is the opposite of what a site asking for room deserves.
+       */
+      if (response.status === 429 || response.status === 503) {
+        await response.body?.cancel();
+
+        return {
+          status: response.status,
+          contentType: response.headers.get("content-type") ?? "",
+          body: "",
+        };
+      }
+
       if (response.status < 300 || response.status >= 400 || location === null) {
         return {
           status: response.status,
@@ -186,7 +212,7 @@ export function serverTransport(options: ServerTransportOptions): CrawlTransport
 
       let lastError: unknown = null;
 
-      for (let attempt = 0; attempt <= BACKOFF_MS.length; attempt++) {
+      for (let attempt = 0; attempt <= backoff.length; attempt++) {
         if (options.signal.aborted) {
           throw new CrawlError("The run was stopped.");
         }
@@ -215,8 +241,8 @@ export function serverTransport(options: ServerTransportOptions): CrawlTransport
           lastError = error;
         }
 
-        if (attempt < BACKOFF_MS.length) {
-          await sleep(BACKOFF_MS[attempt], options.signal);
+        if (attempt < backoff.length) {
+          await sleep(backoff[attempt], options.signal);
         }
       }
 

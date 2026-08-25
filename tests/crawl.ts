@@ -369,6 +369,62 @@ async function transportTests(): Promise<void> {
       }).fetchText("http://93.184.216.34/products.json"),
     /MB|more than/i,
   );
+
+  /*
+   * A 429 must back off and retry, and it must do so even when the error page
+   * the site returns is larger than the size ceiling — reading the body before
+   * looking at the status once made that case fail instantly.
+   */
+  const throttled = scripted([{ status: 429, body: "x".repeat(5000) }]);
+  await refusesAsync(
+    "a 429 is retried, then given up on",
+    () =>
+      serverTransport({
+        signal: new AbortController().signal,
+        delayMs: 0,
+        maxBytes: 1000,
+        backoffMs: [0, 0, 0],
+        fetchImpl: throttled.impl,
+      }).fetchText("http://93.184.216.34/products.json"),
+    /429/,
+  );
+  check(
+    "a 429 was retried, not failed on the first try",
+    throttled.asked.length === 4,
+    `fetched ${throttled.asked.length} time(s)`,
+  );
+
+  const recovers = scripted([
+    { status: 503, body: "busy" },
+    { status: 200, body: '{"products":[]}' },
+  ]);
+  const recovered = await serverTransport({
+    signal: new AbortController().signal,
+    delayMs: 0,
+    backoffMs: [0, 0, 0],
+    fetchImpl: recovers.impl,
+  }).fetchText("http://93.184.216.34/products.json");
+  check("a 503 that clears is followed by the real answer", recovered.status === 200, String(recovered.status));
+  check("the recovered body is returned", recovered.body === '{"products":[]}', recovered.body);
+
+  // A blocked address is deterministic: retrying it is pointless and slow.
+  const blockedHop = scripted([{ status: 302, location: "http://10.0.0.5/x" }]);
+  await refusesAsync(
+    "a blocked redirect is not retried",
+    () =>
+      serverTransport({
+        signal: new AbortController().signal,
+        delayMs: 0,
+        backoffMs: [0, 0, 0],
+        fetchImpl: blockedHop.impl,
+      }).fetchText("http://93.184.216.34/products.json"),
+    /private|refuse|not fetch/i,
+  );
+  check(
+    "the blocked redirect was attempted once",
+    blockedHop.asked.length === 1,
+    `fetched ${blockedHop.asked.length} time(s)`,
+  );
 }
 
 async function main(): Promise<void> {
