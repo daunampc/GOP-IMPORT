@@ -38,6 +38,17 @@ export const NAV: ReadonlyArray<NavItem> = [
     publishing: true,
   },
   {
+    href: "/crawl",
+    label: "Crawl",
+    icon: "download",
+    description: "Read products out of a shop, then import them",
+    // "8" is already Administration's — see below. Keys are shortcuts, not
+    // positions, so this can sit here in the list while using the next free
+    // digit.
+    key: "9",
+    publishing: true,
+  },
+  {
     href: "/products",
     label: "Products",
     icon: "package",
