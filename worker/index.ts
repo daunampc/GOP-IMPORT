@@ -70,6 +70,7 @@ import { imageUploadSupport } from "../lib/plugin-version";
 import type { PurgeOptions } from "../lib/purge-options";
 import { crawlShop } from "../lib/sources/crawl";
 import { CrawlError } from "../lib/sources/crawl/types";
+import { OutboundUrlError } from "../lib/outbound-url";
 import { minorUnitFor, type CrawlOptions } from "../lib/crawl-options";
 import { db } from "../db";
 import { eq } from "drizzle-orm";
@@ -1227,13 +1228,32 @@ async function runCrawl(state: JobState, signal: AbortSignal): Promise<void> {
     await settleRun(jobId, "completed", null);
   } catch (error) {
     /*
-     * A CrawlError is a sentence for the operator — "robots.txt says no",
-     * "password protected", "this needs the browser crawler" — so it is shown as
-     * written. Anything else is a bug and is reported as one rather than dressed
-     * up as advice.
+     * A Stop arrives as a THROW, not as a return.
+     *
+     * The abort reaches whichever request was in flight, so the crawl unwinds
+     * through this catch rather than through the check above — which only fires
+     * if the Stop happened to land between two pages. Reading the signal first
+     * is what stops a deliberate Stop from being recorded as a failure the
+     * operator has to go and investigate.
+     */
+    if (signal.aborted) {
+      await logJob(jobId, {
+        level: "warn",
+        stage: "cancel",
+        message: "Stopped while reading the shop. Nothing was staged.",
+      });
+      await settleRun(jobId, "cancelled", null);
+      return;
+    }
+
+    /*
+     * Both of these are SENTENCES FOR THE OPERATOR, not stack traces: a robots.txt
+     * refusal, a password-protected shop, or a shop whose address resolves somewhere
+     * this app will not fetch. Anything else is a bug, and is reported as one rather
+     * than dressed up as advice.
      */
     const message =
-      error instanceof CrawlError
+      error instanceof CrawlError || error instanceof OutboundUrlError
         ? error.message
         : `The crawl failed: ${error instanceof Error ? error.message : String(error)}`;
 
