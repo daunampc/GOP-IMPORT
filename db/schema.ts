@@ -272,7 +272,9 @@ export const jobs = pgTable(
      *
      * A TS-level enum, not a Postgres one, so adding a member needs no migration.
      */
-    kind: text("kind", { enum: ["import", "purge", "update"] }).notNull().default("import"),
+    kind: text("kind", { enum: ["import", "purge", "update", "crawl"] })
+      .notNull()
+      .default("import"),
 
     storeId: text("store_id").references(() => stores.id, { onDelete: "set null" }),
     /** Copied at creation so history survives the store being removed. */
@@ -470,6 +472,9 @@ export const jobLogs = pgTable(
         "transients",
         "notify",
         "finish",
+        "detect",
+        "discover",
+        "crawl",
       ],
     }).notNull(),
 

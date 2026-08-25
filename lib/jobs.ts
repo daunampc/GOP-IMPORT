@@ -14,6 +14,7 @@ import type { ImportOptions } from "./import-options";
 import type { PurgeItem } from "./purge-options";
 import type { PurgeOptions } from "./purge-options";
 import type { EditItem, EditOptions } from "./edit-options";
+import { type CrawlOptions } from "./crawl-options";
 import { STOP_CHANNEL, createConnection, redis } from "./redis";
 import { MAX_BATCH_SIZE, type ImportResult, type Product } from "./gop-client";
 
@@ -30,7 +31,7 @@ import { MAX_BATCH_SIZE, type ImportResult, type Product } from "./gop-client";
 export const QUEUE_NAME = "gop-import";
 
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
-export type JobKind = "import" | "purge" | "update";
+export type JobKind = "import" | "purge" | "update" | "crawl";
 
 /**
  * A status a run cannot move out of.
@@ -69,7 +70,7 @@ export type CancelMode = "cancel" | "stop";
  * Read it through `job.kind` — that is the discriminant, and every screen that
  * touches `options` has to look at it first.
  */
-export type JobOptions = ImportOptions | PurgeOptions | EditOptions;
+export type JobOptions = ImportOptions | PurgeOptions | EditOptions | CrawlOptions;
 
 /** Narrowing helpers, so no screen has to guess at the shape of `options`. */
 export function isImportRun(job: JobState): job is JobState & { options: ImportOptions } {
@@ -89,6 +90,16 @@ export function isPurgeRun(job: JobState): job is JobState & { options: PurgeOpt
  */
 export function isEditRun(job: JobState): job is JobState & { options: EditOptions } {
   return job.kind === "update";
+}
+
+/**
+ * A crawl READS a shop; it does not write to one.
+ *
+ * Which is why `storeId` is empty on these runs and every screen that resolves a
+ * target site has to tolerate that. See `enqueueCrawl`.
+ */
+export function isCrawlRun(job: JobState): job is JobState & { options: CrawlOptions } {
+  return job.kind === "crawl";
 }
 
 export interface JobState {
@@ -279,7 +290,14 @@ function toState(row: Row): JobState {
 /* -------------------------------------------------------------- creating */
 
 export interface EnqueueInput {
-  storeId: string;
+  /**
+   * The site this run targets, or `null` for a crawl, which has none.
+   *
+   * The column has always been nullable — a deleted site sets it null rather
+   * than deleting the run's history — so `toState` already reads it back as `""`
+   * and every screen already handles a run with no site.
+   */
+  storeId: string | null;
   storeUrl: string;
   sourceLabel: string;
   options: JobOptions;
@@ -416,6 +434,26 @@ export async function enqueueEdit(
 ): Promise<JobState> {
   const { products, ...rest } = input;
   return enqueueJob({ ...rest, kind: "update", items: products });
+}
+
+/**
+ * A crawl.
+ *
+ * `items` is EMPTY at creation, and that is the difference from every other run
+ * here: the other three are handed their payload and send it, while a crawl goes
+ * and finds one. `job_item` is written again by the worker when it has products,
+ * which is what `fromCrawl` in `lib/build-products.ts` then reads back.
+ *
+ * `storeId` is null because there is no target site. `storeUrl` and `storeLabel`
+ * carry the shop being READ, which keeps the run list's "which site did this
+ * touch" column meaningful rather than blank.
+ */
+export async function enqueueCrawl(
+  input: Omit<EnqueueInput, "items" | "options" | "kind" | "storeId"> & {
+    options: CrawlOptions;
+  },
+): Promise<JobState> {
+  return enqueueJob({ ...input, kind: "crawl", storeId: null, items: [] });
 }
 
 /* --------------------------------------------------------------- reading */
