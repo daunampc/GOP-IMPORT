@@ -1,6 +1,6 @@
 import { crawlOptionsSchema } from "@/lib/crawl-options";
 import { enqueueCrawl } from "@/lib/jobs";
-import { limitsFor } from "@/lib/limits";
+import { checkCrawl } from "@/lib/limits";
 import { apiRequireView } from "@/lib/view";
 
 /**
@@ -47,20 +47,14 @@ export async function POST(request: Request) {
     );
   }
 
-  const limits = await limitsFor(guard.ownerId);
-  if (!limits.importEnabled) {
-    return Response.json(
-      { error: "This account is not allowed to import products." },
-      { status: 403 },
-    );
+  const allowed = await checkCrawl(guard.ownerId, { count: options.limit });
+  if (!allowed.ok) {
+    return allowed.response;
   }
 
-  let host: string;
-  try {
-    host = new URL(options.shopUrl).host;
-  } catch {
-    return Response.json({ error: "That is not a web address." }, { status: 400 });
-  }
+  // `crawlOptionsSchema` already validated `shopUrl` with `.url()`, which is
+  // itself `new URL()`-backed, so this cannot throw. Only the host is needed.
+  const host = new URL(options.shopUrl).host;
 
   const job = await enqueueCrawl({
     // The shop being READ. It is not a target site, but it is the site this run

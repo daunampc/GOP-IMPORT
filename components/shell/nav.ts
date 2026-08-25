@@ -46,7 +46,10 @@ export const NAV: ReadonlyArray<NavItem> = [
     // positions, so this can sit here in the list while using the next free
     // digit.
     key: "9",
-    publishing: true,
+    // NOT publishing: a crawl reads a third-party shop and writes to nobody's
+    // site, so the flag that hides publishing screens from an administrator
+    // does not apply here. The publishing check lives on the import step that
+    // later reads the crawl's results, not on the crawl itself.
   },
   {
     href: "/products",
