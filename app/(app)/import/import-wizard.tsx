@@ -774,7 +774,7 @@ export function ImportWizard({
               loading={previewing}
               onClick={() => void runPreview()}
             >
-              Read the file and preview
+              {crawlJobId !== null ? "Preview the crawled products" : "Read the file and preview"}
             </Button>
           </div>
         </>

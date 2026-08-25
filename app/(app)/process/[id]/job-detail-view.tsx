@@ -1206,18 +1206,38 @@ export function JobDetailView({
         confirmLabel="Cancel this run"
         message={
           <>
-            <p>
-              Cancelling does NOT kill the job mid-flight. Each lane finishes the batch it has
-              already sent and then stops, so no product is cut off while it is being written to the
-              database.
-            </p>
-            <p className="mt-2">
-              The {formatNumber(job.processed)} products already processed stay on the site.
-            </p>
-            <p className="mt-2">
-              If the site has stopped answering altogether, this will wait for the request already
-              in flight to time out. <strong>Stop now</strong> is the one that does not wait.
-            </p>
+            {crawl ? (
+              <>
+                <p>
+                  A crawl only reads the shop it points at — it never writes anywhere, so there is
+                  nothing on any site for cancelling to undo.
+                </p>
+                <p className="mt-2">
+                  Whatever it has read so far is discarded rather than staged: nothing is kept for
+                  the import wizard to pick up.
+                </p>
+                <p className="mt-2">
+                  If the shop has stopped answering altogether, this will wait for the request
+                  already in flight to time out. <strong>Stop now</strong> is the one that does not
+                  wait.
+                </p>
+              </>
+            ) : (
+              <>
+                <p>
+                  Cancelling does NOT kill the job mid-flight. Each lane finishes the batch it has
+                  already sent and then stops, so no product is cut off while it is being written to the
+                  database.
+                </p>
+                <p className="mt-2">
+                  The {formatNumber(job.processed)} products already processed stay on the site.
+                </p>
+                <p className="mt-2">
+                  If the site has stopped answering altogether, this will wait for the request already
+                  in flight to time out. <strong>Stop now</strong> is the one that does not wait.
+                </p>
+              </>
+            )}
 
             {/*
               The group is offered explicitly, with its real size, and never
@@ -1257,29 +1277,48 @@ export function JobDetailView({
         title="Stop this run immediately?"
         confirmLabel="Stop now"
         message={
-          <>
-            <p>
-              This abandons the request that is in flight rather than waiting for it. Use it when a
-              site has accepted the connection and stopped answering — the case where Cancel appears
-              to do nothing because there is no batch boundary to reach.
-            </p>
-            {/*
-              The removal screen sets the standard for this kind of honesty, and
-              this is the same shape of admission: say what is NOT guaranteed,
-              before the press, in the same words that get recorded on the run.
-            */}
-            <p className="mt-2">
-              <strong>What this cannot promise:</strong> the plugin may already have committed the
-              batch it was sent. The site can end up holding products that are{" "}
-              <strong>not listed in the results table</strong>, because this app never saw the answer
-              for them. Check the site before importing the same file again — the idempotency keys
-              mean a second import returns the existing products rather than creating duplicates.
-            </p>
-            <p className="mt-2">
-              If the site is merely slow rather than stuck, <strong>Cancel</strong> is the safer
-              choice: it stops at a batch boundary and everything it sent is accounted for.
-            </p>
-          </>
+          crawl ? (
+            <>
+              <p>
+                This abandons the request that is in flight rather than waiting for it. Use it when
+                the shop has accepted the connection and stopped answering.
+              </p>
+              <p className="mt-2">
+                A crawl never calls the plugin and never writes to a site, so there is nothing it
+                could already have committed elsewhere. Stopping discards whatever it has read so
+                far rather than staging it — nothing is left for the import wizard to pick up.
+              </p>
+              <p className="mt-2">
+                If the shop is merely slow rather than stuck, <strong>Cancel</strong> is the gentler
+                choice: it does not abandon a request that is already on its way back, the way Stop
+                does regardless.
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                This abandons the request that is in flight rather than waiting for it. Use it when a
+                site has accepted the connection and stopped answering — the case where Cancel appears
+                to do nothing because there is no batch boundary to reach.
+              </p>
+              {/*
+                The removal screen sets the standard for this kind of honesty, and
+                this is the same shape of admission: say what is NOT guaranteed,
+                before the press, in the same words that get recorded on the run.
+              */}
+              <p className="mt-2">
+                <strong>What this cannot promise:</strong> the plugin may already have committed the
+                batch it was sent. The site can end up holding products that are{" "}
+                <strong>not listed in the results table</strong>, because this app never saw the answer
+                for them. Check the site before importing the same file again — the idempotency keys
+                mean a second import returns the existing products rather than creating duplicates.
+              </p>
+              <p className="mt-2">
+                If the site is merely slow rather than stuck, <strong>Cancel</strong> is the safer
+                choice: it stops at a batch boundary and everything it sent is accounted for.
+              </p>
+            </>
+          )
         }
       />
 
@@ -1310,11 +1349,20 @@ export function JobDetailView({
                 </>
               )}
             </p>
-            <p className="mt-2">
-              The {formatNumber(job.succeeded)} products already published are{" "}
-              <strong>not</strong> touched. This deletes the record of the run, not its effect — use{" "}
-              <strong>Remove products</strong> for that.
-            </p>
+            {crawl ? (
+              <p className="mt-2">
+                A crawl never writes to a site, so there is nothing anywhere for this to affect.
+                It does delete the {formatNumber(job.total)} product{job.total === 1 ? "" : "s"}{" "}
+                this crawl found — they were never published, so once this run is gone the shop
+                would have to be crawled again to import them.
+              </p>
+            ) : (
+              <p className="mt-2">
+                The {formatNumber(job.succeeded)} products already published are{" "}
+                <strong>not</strong> touched. This deletes the record of the run, not its effect —
+                use <strong>Remove products</strong> for that.
+              </p>
+            )}
             <p className="mt-2">There is no undo.</p>
           </>
         }
