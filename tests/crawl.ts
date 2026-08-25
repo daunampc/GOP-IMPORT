@@ -426,6 +426,32 @@ async function transportTests(): Promise<void> {
     blockedHop.asked.length === 1,
     `fetched ${blockedHop.asked.length} time(s)`,
   );
+
+  const timed = scripted([{ status: 200, body: "{}" }, { status: 200, body: "{}" }]);
+  const raisable = serverTransport({
+    signal: new AbortController().signal,
+    delayMs: 10,
+    fetchImpl: timed.impl,
+  });
+  check("a transport exposes its floor", typeof raisable.raiseDelayTo === "function");
+  raisable.raiseDelayTo(150);
+  raisable.raiseDelayTo(10);
+  /*
+   * Asserted through the actual wait rather than a getter: after being asked
+   * for 150ms and then for 10ms, the floor must still be 150ms. Two requests to
+   * the same host are timed end to end, so a lowering that slipped through
+   * would show up as a ~10ms gap instead of a ~150ms one — the bug this guards
+   * against would make this test pass in a fifteenth of the time.
+   */
+  const start = Date.now();
+  await raisable.fetchText("http://93.184.216.34/products.json");
+  await raisable.fetchText("http://93.184.216.34/products.json");
+  const elapsed = Date.now() - start;
+  check(
+    "raising then lowering keeps the higher floor",
+    elapsed >= 140,
+    `elapsed ${elapsed}ms, expected at least 140ms`,
+  );
 }
 
 async function orchestratorTests(): Promise<void> {
@@ -508,6 +534,22 @@ async function orchestratorTests(): Promise<void> {
         transport: blocked.transport,
       }),
     /robots\.txt/i,
+  );
+
+  /*
+   * The claim is "one request and stop", not merely "it throws". Without this
+   * the test would still pass if the crawl fetched every product first and only
+   * then noticed the refusal.
+   */
+  check(
+    "a disallowed store costs exactly one request",
+    blocked.asked.length === 1,
+    `fetched: ${JSON.stringify(blocked.asked)}`,
+  );
+  check(
+    "no product request was made",
+    !blocked.asked.some((url) => url.includes("products.json")),
+    `fetched: ${JSON.stringify(blocked.asked)}`,
   );
 }
 

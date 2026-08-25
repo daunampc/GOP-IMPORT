@@ -31,6 +31,20 @@ export interface ServerTransportOptions {
   backoffMs?: number[];
 }
 
+/**
+ * A transport whose politeness floor can be raised after it is built.
+ *
+ * The crawl has to fetch robots.txt before it can know the site's `Crawl-delay`,
+ * and that fetch is itself a request to the same host. Building a second
+ * transport once the answer is known would start a fresh per-host clock and let
+ * the first product request follow robots.txt with no gap at all, so the one
+ * transport learns instead.
+ */
+export interface ServerTransport extends CrawlTransport {
+  /** Raise the floor. Never lowers it: a site asking for room is not negotiable. */
+  raiseDelayTo(ms: number): void;
+}
+
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -77,11 +91,12 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-export function serverTransport(options: ServerTransportOptions): CrawlTransport {
+export function serverTransport(options: ServerTransportOptions): ServerTransport {
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const doFetch = options.fetchImpl ?? fetch;
   const backoff = options.backoffMs ?? BACKOFF_MS;
+  let delayMs = options.delayMs;
 
   /** When each host may next be asked for something. */
   const nextAllowedAt = new Map<string, number>();
@@ -196,6 +211,10 @@ export function serverTransport(options: ServerTransportOptions): CrawlTransport
   }
 
   return {
+    raiseDelayTo(ms: number): void {
+      delayMs = Math.max(delayMs, ms);
+    },
+
     async fetchText(raw: string): Promise<CrawlResponse> {
       /*
        * THE guard. `assertFetchableUrl` resolves the hostname and inspects every
@@ -217,7 +236,7 @@ export function serverTransport(options: ServerTransportOptions): CrawlTransport
           throw new CrawlError("The run was stopped.");
         }
 
-        nextAllowedAt.set(url.host, Date.now() + options.delayMs);
+        nextAllowedAt.set(url.host, Date.now() + delayMs);
 
         try {
           const response = await once(url);

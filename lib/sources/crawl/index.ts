@@ -11,7 +11,7 @@
 import type { Product } from "../../gop-client";
 import { shopifyAdapter } from "./adapters/shopify";
 import { CRAWLER_USER_AGENT, parseRobots } from "./robots";
-import { serverTransport } from "./transport";
+import { serverTransport, type ServerTransport } from "./transport";
 import {
   CrawlError,
   type CrawlAdapter,
@@ -100,6 +100,19 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
     );
   }
 
+  /*
+   * One transport for the whole crawl, and its floor is raised rather than a
+   * second one being built.
+   *
+   * robots.txt is itself a request to this host, so a fresh transport for the
+   * products would start a fresh per-host clock and let the first product
+   * request follow robots.txt instantly — the one gap the delay is least
+   * entitled to skip, since it is the gap the site just told us about.
+   */
+  if (rules.crawlDelayMs !== null && "raiseDelayTo" in transport) {
+    (transport as ServerTransport).raiseDelayTo(rules.crawlDelayMs);
+  }
+
   const adapter = pickAdapter(input.platform);
 
   input.log({
@@ -112,13 +125,7 @@ export async function crawlShop(input: CrawlInput): Promise<CrawlOutcome> {
 
   for await (const product of adapter.fetchProducts({
     shopUrl,
-    transport:
-      input.transport ??
-      serverTransport({
-        signal: input.signal,
-        // A site that asks for more room gets it. Never less than our own floor.
-        delayMs: Math.max(DEFAULT_DELAY_MS, rules.crawlDelayMs ?? 0),
-      }),
+    transport,
     limit: input.limit,
     imagesPerProduct: input.imagesPerProduct,
     minorUnit: input.minorUnit,
