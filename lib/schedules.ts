@@ -45,7 +45,8 @@ export interface Schedule {
   storeId: string;
   storeUrl: string;
   storeLabel: string;
-  kind: JobKind;
+  /** Never "crawl" — a series repeats a payload, and a crawl has none. See createSchedule. */
+  kind: Exclude<JobKind, "crawl">;
   sourceLabel: string;
   options: Record<string, unknown>;
   everyMinutes: number;
@@ -63,7 +64,8 @@ export interface CreateScheduleInput {
   storeId: string;
   storeUrl: string;
   storeLabel?: string;
-  kind?: JobKind;
+  /** Never "crawl" — a series repeats a payload, and a crawl has none. See createSchedule. */
+  kind?: Exclude<JobKind, "crawl">;
   sourceLabel: string;
   options: Record<string, unknown>;
   items: unknown[];

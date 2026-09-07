@@ -38,6 +38,20 @@ export const NAV: ReadonlyArray<NavItem> = [
     publishing: true,
   },
   {
+    href: "/crawl",
+    label: "Crawl",
+    icon: "download",
+    description: "Read products out of a shop, then import them",
+    // "8" is already Administration's — see below. Keys are shortcuts, not
+    // positions, so this can sit here in the list while using the next free
+    // digit.
+    key: "9",
+    // NOT publishing: a crawl reads a third-party shop and writes to nobody's
+    // site, so the flag that hides publishing screens from an administrator
+    // does not apply here. The publishing check lives on the import step that
+    // later reads the crawl's results, not on the crawl itself.
+  },
+  {
     href: "/products",
     label: "Products",
     icon: "package",

@@ -25,7 +25,7 @@ export async function POST(request: Request) {
   }
 
   try {
-    const built = await buildProductsFromRequest(request);
+    const built = await buildProductsFromRequest(request, guard.ownerId);
 
     const duplicateSkus = findDuplicateSkus(built.products);
     const rows = toRows(built.products, duplicateSkus, built.generatedSku);

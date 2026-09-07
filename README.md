@@ -486,9 +486,12 @@ nothing.
 
 ## Source data
 
-**CSV, and only CSV.** Four formats: Shopify/Shopbase (grouped by `Handle`),
-WooCommerce (`Type=variation` rows pointing at `Parent`), Etsy (the Download
-Listings export) and **Custom** — any CSV at all, with the columns named by hand.
+**A file, or a shop.** The file path takes four CSV formats: Shopify/Shopbase
+(grouped by `Handle`), WooCommerce (`Type=variation` rows pointing at `Parent`),
+Etsy (the Download Listings export) and **Custom** — any CSV at all, with the
+columns named by hand. The other path is the crawler, described at the end of
+this section: it reads a Shopify storefront directly instead of a file. Both
+arrive at the same wizard as the same `Product[]`.
 
 The format is worked out **at step one, in the browser**, from the file's header
 line alone: 64KB read locally, no upload and no parse. The detected answer is
@@ -520,6 +523,91 @@ the nearest thing.
 An unrecognised file **says so** and drops into Custom with the columns matched as
 far as their names allowed — it is never quietly read as Shopify. A mapping is
 remembered against the signature of the column set.
+
+### The crawler: a second source, not a second pipeline
+
+`/crawl` reads **Shopify, WooCommerce, Magento or any schema.org shop** instead
+of accepting a file — Etsy alone is not built (see below). It runs as its own
+job `kind` — `"crawl"` — through the exact same queue, Cancel/Stop buttons and
+live log every other run kind uses, but it never writes anywhere: it refuses
+outright if the shop's `robots.txt` disallows the paths the chosen adapter is
+about to fetch (no override — see `lib/sources/crawl/robots.ts`), and stops once
+it has read the limit typed into the form — refused outright at the route,
+before the run is even created, if that number exceeds the account's own
+`maxProductsPerRun` ceiling (`lib/limits.ts`) rather than being silently clamped
+down to it.
+
+Which platform to read is either named on the form or worked out by `auto`: one
+request to the shop's home page, scored by every adapter against its own
+signals — header/cookie names, `<meta name="generator">`, asset paths — highest
+score wins, and a shop nothing recognises falls back to `generic` rather than
+refusing outright (`lib/sources/crawl/index.ts`). robots.txt is read once,
+before any product request, and each adapter declares the paths it is actually
+about to fetch (`robotsPaths`) so the check is against the request that will
+really happen — the orchestrator used to check one path on every adapter's
+behalf regardless of which one was running. An adapter that discovers URLs at
+run time rather than knowing them up front — `generic`, from a sitemap — checks
+each one as it goes, through `CrawlContext.isAllowed`.
+
+- **Shopify** reads `/products.json?page=N`, paging until an empty array.
+- **WooCommerce** reads the public Store API, `/wp-json/wc/store/v1/products` —
+  no authentication, on purpose. The credentialed v3 REST API was designed as a
+  fallback and was never built: it needs a shop owner's API key, and storing,
+  encrypting and being trusted with that key is a surface this app does not need
+  to carry for a feature that reads public data. Fails with a clear message if
+  the shop has turned the Store API off, which some do.
+- **Magento** reads the storefront GraphQL endpoint, `/graphql`, over **GET**.
+  `CrawlTransport` deliberately exposes one verb — it is the exact seam a
+  customer's own browser will stand in for later (§12 of the crawler design
+  doc), and a relay a server can ask to POST arbitrary bodies is a far bigger
+  thing to hand somebody than one that can only ask a question. A store whose
+  GraphQL install only accepts POST fails with a message saying so. Every
+  product maps as `type: "simple"`: reading `ConfigurableProduct` variants needs
+  a second query shape per product, and that was left out rather than
+  half-built.
+- **generic** is the fallback for a shop none of the above recognise: it reads
+  `sitemap.xml` for product URLs, then each page for a JSON-LD `Product` block,
+  then Open Graph's `product:price:*` meta tags if there is no JSON-LD. It
+  deliberately does **not** parse microdata or run any DOM heuristic — both need
+  real tree traversal, and a regular-expression stand-in for that is how a
+  crawler starts inventing prices (`lib/sources/crawl/html.ts`). Fails if the
+  shop has no sitemap, since that is the only way this adapter finds a product
+  at all.
+
+What it finds is written to `job_item` — the same JSON-payload table every other
+run kind already writes to, just carrying an **output** this time instead of an
+input — and `lib/build-products.ts` reads it back through a `fromCrawl` branch
+that returns the identical `SourceResult` shape `fromCsv` does. Nothing
+downstream can tell the difference: `applyOptions`, the preview, all four wizard
+steps and the `idempotency_key` that keeps a re-import from duplicating products
+run completely unmodified. A crawl feeds the wizard at `/import?crawl=<jobId>`
+exactly the way a CSV feeds it at the drop zone.
+
+Prices are read into a decimal string by hand-rolled string arithmetic
+(`lib/sources/crawl/money.ts`), never by floating-point division:
+`Number("18.005") * 100` is `1800.4999999999998`, and an operator-entered
+exchange rate only compounds whatever error is already there. Each platform
+hands the module a different raw shape — Shopify's `/products.json` quotes a
+decimal (`"18.00"`) while its AJAX `/products/{handle}.js` endpoint sends
+integer cents instead, and reading one as the other is a price wrong by a
+hundred; WooCommerce's Store API states its own `currency_minor_unit` per
+product, so JPY and VND (no minor unit at all) are never divided by 100 anyway;
+Magento sends a JSON number that is turned straight back into a string rather
+than multiplied where it stands. `minorUnitFor`, which decimal places a
+currency has, and `lessThan`, which compares two prices on their integer minor
+units rather than as parsed floats, both live once in `money.ts` rather than as
+three separate copies of the same currency table — a currency added to one
+adapter and not the other two is a price wrong by a factor of ten. All three
+fast-path adapters now decide a sale price through `lessThan`; two of them used
+to compare with `Number()`. The module refuses to parse a price it cannot
+represent exactly rather than silently rounding it.
+
+Etsy alone is not built: it publishes no JSON product feed the way the other
+four do, so reading it needs a real browser. That is designed at §12 of
+`docs/superpowers/specs/2026-08-24-product-crawler-source-design.md` — a Chrome
+extension on the customer's own machine standing in for the fetches this file
+makes directly — but not built in this release, and the form disables `Etsy`
+rather than offering a platform it cannot read.
 
 ## The design system
 
@@ -1078,6 +1166,23 @@ URL path, and the strongest assertion in all four is the **request count read fr
 the fixture itself** — how many times something was sent is a fact only the
 receiving end holds, where counting log lines would only count this app's own
 account of what it did.
+
+```bash
+./tests/crawl.sh
+```
+
+The odd one out: no Docker, no Postgres, no Redis, no fake host. Everything the
+crawler's fast paths depend on — decoding Shopify's cents, WooCommerce's own
+minor-unit exponent and Magento's floats into the same decimal price without
+going through JavaScript's floating-point division, translating a `*`/`$`
+robots.txt pattern into a match, mapping a Shopify, WooCommerce or Magento
+product (including the single-variant "Default Title" case, and a WooCommerce
+variation that fails to read and degrades the product to `simple` rather than
+publishing an invented price) into the shape the rest of the pipeline already
+expects, walking a redirect chain hop by hop past the SSRF guard, scoring
+platform auto-detection against a fixture home page — is a pure function over a
+saved fixture, so the whole suite runs in under a second and there is no excuse
+for it ever being skipped. **184 passed, 0 failed.**
 
 Static checks:
 
