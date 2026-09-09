@@ -22,6 +22,9 @@ import { MAX_UPDATE_BATCH } from "./gop-client";
 export const PRICE_OPERATIONS = ["percent", "amount", "fixed"] as const;
 export type PriceOperation = (typeof PRICE_OPERATIONS)[number];
 
+export const DEFAULT_PRICE_DECIMALS = 2;
+export const MAX_PRICE_DECIMALS = 4;
+
 export const PRICE_OPERATION_LABELS: Record<PriceOperation, string> = {
   percent: "By a percentage",
   amount: "By a fixed amount",
@@ -59,10 +62,18 @@ export const editOperationSchema = z.discriminatedUnion("kind", [
     /** A percentage, an amount, or the fixed price — read according to `operation`. */
     value: z.coerce.number().finite(),
     /**
-     * Round the result to this many decimals. 0 for a currency with no minor unit,
-     * which is the common case here (VND).
+     * Round calculated percentage/amount results to this many decimals.
+     *
+     * Fixed prices are never rounded here: the exact numeric value entered by the
+     * operator is written as-is. The default of 2 is suitable for currencies such
+     * as USD while callers can still explicitly use 0 for currencies such as VND.
      */
-    decimals: z.coerce.number().int().min(0).max(4).default(2),
+    decimals: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_PRICE_DECIMALS)
+      .default(DEFAULT_PRICE_DECIMALS),
   }),
   z.object({
     kind: z.literal("clear_sale"),
@@ -193,12 +204,44 @@ export function resolveEdit(
 
   switch (operation.kind) {
     case "price": {
+      /*
+       * IMPORTANT:
+       * A fixed price is an absolute value chosen by the operator. It must never go
+       * through the rounding path used by percentage/amount arithmetic.
+       *
+       * Example:
+       *   23.95 -> "23.95"
+       * not:
+       *   Math.round(23.95) -> 24
+       */
+      if (operation.operation === "fixed") {
+        const next = operation.value;
+
+        if (!Number.isFinite(next) || next <= 0) {
+          return {
+            ok: false,
+            product,
+            reason: `It would end up at ${next} — at or below zero. Nothing was changed.`,
+          };
+        }
+
+        return {
+          ok: true,
+          item: {
+            ...base,
+            set: {
+              [operation.target]: priceToString(next),
+            },
+          },
+        };
+      }
+
       const current =
         operation.target === "sale_price"
           ? (product.sale_price ?? "")
           : (product.regular_price ?? product.price ?? "");
 
-      if (operation.operation !== "fixed" && current.trim() === "") {
+      if (current.trim() === "") {
         return {
           ok: false,
           product,
@@ -209,9 +252,9 @@ export function resolveEdit(
         };
       }
 
-      const from = operation.operation === "fixed" ? 0 : Number.parseFloat(current);
+      const from = Number.parseFloat(current);
 
-      if (operation.operation !== "fixed" && !Number.isFinite(from)) {
+      if (!Number.isFinite(from)) {
         return {
           ok: false,
           product,
@@ -222,14 +265,9 @@ export function resolveEdit(
       const raw =
         operation.operation === "percent"
           ? from * (1 + operation.value / 100)
-          : operation.operation === "amount"
-            ? from + operation.value
-            : operation.value;
+          : from + operation.value;
 
-      const next =
-        operation.operation === "fixed"
-          ? operation.value
-          : round(raw, operation.decimals);
+      const next = round(raw, operation.decimals);
 
       // Refused, with the number named, rather than clamped to zero.
       if (!Number.isFinite(next) || next <= 0) {
@@ -242,7 +280,12 @@ export function resolveEdit(
 
       return {
         ok: true,
-        item: { ...base, set: { [operation.target]: String(next) } },
+        item: {
+          ...base,
+          set: {
+            [operation.target]: priceToString(next),
+          },
+        },
       };
     }
 
@@ -271,7 +314,21 @@ export function resolveEdit(
 
 function round(value: number, decimals: number): number {
   const factor = 10 ** decimals;
-  return Math.round(value * factor) / factor;
+
+  // EPSILON avoids common binary floating-point edge cases such as
+  // 1.005 * 100 becoming 100.499999999...
+  return Math.round((value + Number.EPSILON) * factor) / factor;
+}
+
+/**
+ * WooCommerce accepts decimal prices as strings.
+ *
+ * Keep the actual numeric precision instead of applying an additional formatting
+ * or integer rounding step here. UI code may display 14 as 14.00, but values such
+ * as 23.95 remain exactly "23.95".
+ */
+function priceToString(value: number): string {
+  return Object.is(value, -0) ? "0" : String(value);
 }
 
 /* ------------------------------------------------------- describing and gating */
