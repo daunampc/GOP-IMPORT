@@ -62,7 +62,7 @@ export const editOperationSchema = z.discriminatedUnion("kind", [
      * Round the result to this many decimals. 0 for a currency with no minor unit,
      * which is the common case here (VND).
      */
-    decimals: z.coerce.number().int().min(0).max(4).default(0),
+    decimals: z.coerce.number().int().min(0).max(4).default(2),
   }),
   z.object({
     kind: z.literal("clear_sale"),
@@ -226,7 +226,10 @@ export function resolveEdit(
             ? from + operation.value
             : operation.value;
 
-      const next = round(raw, operation.decimals);
+      const next =
+        operation.operation === "fixed"
+          ? operation.value
+          : round(raw, operation.decimals);
 
       // Refused, with the number named, rather than clamped to zero.
       if (!Number.isFinite(next) || next <= 0) {
