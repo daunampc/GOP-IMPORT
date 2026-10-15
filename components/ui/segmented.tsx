@@ -16,6 +16,11 @@ export interface SegmentedOption<T extends string> {
  *
  * `role="radiogroup"` rather than a strip of separate buttons: this is ONE
  * choice, not several actions, and a screen reader has to hear that.
+ *
+ * `label` becomes this group's `aria-label` and is required whenever `Segmented`
+ * is its own accessible name — most of its callers. Leave it out only when a
+ * surrounding element (a `Field`, most likely) already gives this control a
+ * visible label: passing both would have a screen reader announce it twice.
  */
 export function Segmented<T extends string>({
   label,
@@ -27,7 +32,7 @@ export function Segmented<T extends string>({
   disabled = false,
   className,
 }: {
-  label: string;
+  label?: string;
   value: T;
   options: ReadonlyArray<SegmentedOption<T>>;
   onChange: (next: T) => void;

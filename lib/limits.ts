@@ -193,6 +193,49 @@ export async function checkImport(
   return asCheck(await importVerdict(ownerId, options));
 }
 
+/**
+ * May this account start a crawl of this size?
+ *
+ * Shares `importEnabled` with an import rather than having a switch of its own:
+ * a crawl exists only to feed an import, so an account that may not import has
+ * nothing to do with what a crawl would produce.
+ *
+ * No `maxThreads` check, unlike `importVerdict` — a crawl talks to one shop at a
+ * time on purpose, and its politeness delay is not a knob the operator turns.
+ */
+export async function crawlVerdict(
+  ownerId: string,
+  options: { count: number },
+): Promise<LimitVerdict> {
+  const limits = await limitsFor(ownerId);
+
+  if (!limits.importEnabled) {
+    return {
+      ok: false,
+      message: "Importing is switched off for this account. Ask an administrator to enable it.",
+    };
+  }
+
+  if (limits.maxProductsPerRun !== null && options.count > limits.maxProductsPerRun) {
+    return {
+      ok: false,
+      message:
+        `This crawl asks for ${options.count.toLocaleString("en-GB")} products, and this account is ` +
+        `limited to ${limits.maxProductsPerRun.toLocaleString("en-GB")} per run. Lower "Stop after", ` +
+        `or ask an administrator to raise the limit.`,
+    };
+  }
+
+  return { ok: true };
+}
+
+export async function checkCrawl(
+  ownerId: string,
+  options: { count: number },
+): Promise<LimitCheck> {
+  return asCheck(await crawlVerdict(ownerId, options));
+}
+
 export async function removeVerdict(ownerId: string): Promise<LimitVerdict> {
   const limits = await limitsFor(ownerId);
 

@@ -1,0 +1,57 @@
+[
+  {
+    "id": 21,
+    "name": "Cotton Tote",
+    "slug": "cotton-tote",
+    "type": "simple",
+    "sku": "TOTE-01",
+    "description": "<p>Roomy.</p>",
+    "short_description": "<p>Roomy tote.</p>",
+    "prices": {
+      "price": "1450",
+      "regular_price": "1450",
+      "sale_price": "1450",
+      "currency_code": "USD",
+      "currency_minor_unit": 2
+    },
+    "is_in_stock": true,
+    "images": [{ "id": 9, "src": "https://shop.example/wp-content/uploads/tote.jpg" }],
+    "categories": [{ "id": 3, "name": "Bags", "slug": "bags" }],
+    "tags": [{ "id": 8, "name": "cotton", "slug": "cotton" }],
+    "attributes": [],
+    "variations": []
+  },
+  {
+    "id": 44,
+    "name": "Linen Shirt",
+    "slug": "linen-shirt",
+    "type": "variable",
+    "sku": "SHIRT",
+    "description": "<p>Linen.</p>",
+    "short_description": "",
+    "prices": {
+      "price": "5900",
+      "regular_price": "5900",
+      "sale_price": "5900",
+      "currency_code": "USD",
+      "currency_minor_unit": 2
+    },
+    "is_in_stock": true,
+    "images": [{ "id": 12, "src": "https://shop.example/wp-content/uploads/shirt.jpg" }],
+    "categories": [{ "id": 4, "name": "Clothing", "slug": "clothing" }],
+    "tags": [],
+    "attributes": [
+      {
+        "id": 1,
+        "name": "Size",
+        "taxonomy": "pa_size",
+        "has_variations": true,
+        "terms": [{ "id": 5, "name": "S", "slug": "s" }, { "id": 6, "name": "M", "slug": "m" }]
+      }
+    ],
+    "variations": [
+      { "id": 45, "attributes": [{ "name": "Size", "value": "S" }] },
+      { "id": 46, "attributes": [{ "name": "Size", "value": "M" }] }
+    ]
+  }
+]

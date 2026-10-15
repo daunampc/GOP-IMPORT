@@ -68,6 +68,19 @@ export async function PATCH(request: Request, context: RouteContext<"/api/jobs/[
     );
   }
 
+  /*
+   * A crawl cannot be scheduled.
+   *
+   * Not an oversight and not a limitation to lift later: a schedule re-runs a
+   * payload, and a crawl has none — it goes and finds one. Repeating a crawl
+   * nightly is a different feature with a different meaning, and letting this
+   * route accept one would create a series that quietly produced a new preview
+   * nobody asked for.
+   */
+  if (state.kind === "crawl") {
+    return Response.json({ error: "A crawl cannot be scheduled." }, { status: 400 });
+  }
+
   // The run's OWNER, not the caller: an administrator moving a member's run is
   // bound by the member's ceilings, because it is the member's run that will fire.
   if (state.kind === "import") {

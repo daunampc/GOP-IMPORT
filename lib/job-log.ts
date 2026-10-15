@@ -41,7 +41,10 @@ export type LogStage =
   | "cancel"
   | "transients"
   | "notify"
-  | "finish";
+  | "finish"
+  | "detect"
+  | "discover"
+  | "crawl";
 
 export interface LogEntry {
   level?: LogLevel;

@@ -48,6 +48,12 @@ export async function POST(
     );
   }
 
+  // A crawl has no per-row results, so there is nothing to retry. It also has no
+  // target site, and the lookup below would fail on it.
+  if (job.kind === "crawl") {
+    return Response.json({ error: "A crawl has no rows to retry." }, { status: 400 });
+  }
+
   // Resolved without a scope because the site belongs to the RUN's owner: an
   // administrator resending a member's failures is not the site's owner.
   const store = await getStoreUnscoped(job.storeId);

@@ -31,12 +31,14 @@ export const JOB_KIND_LABELS: Record<JobKind, string> = {
   import: "Import",
   purge: "Removal",
   update: "Bulk edit",
+  crawl: "Crawl",
 };
 
-export const JOB_KIND_ICONS: Record<JobKind, "upload" | "trash" | "refresh"> = {
+export const JOB_KIND_ICONS: Record<JobKind, "upload" | "trash" | "refresh" | "download"> = {
   import: "upload",
   purge: "trash",
   update: "refresh",
+  crawl: "download",
 };
 
 export const JOB_KIND_TONES: Record<JobKind, "neutral" | "bad" | "warn"> = {
@@ -44,6 +46,8 @@ export const JOB_KIND_TONES: Record<JobKind, "neutral" | "bad" | "warn"> = {
   purge: "bad",
   // Warn rather than neutral: it wrote over products that were already on sale.
   update: "warn",
+  // Neutral: a crawl reads, and writes nothing to anybody's shop.
+  crawl: "neutral",
 };
 
 export type JobDisplayStatus =

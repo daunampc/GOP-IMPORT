@@ -1,6 +1,7 @@
 import "server-only";
 
 import { importOptionsSchema, type ImportOptions } from "./import-options";
+import { getJobProducts, getJobState } from "./jobs";
 import {
   DIALECT_ORDER,
   decodeCsv,
@@ -47,7 +48,16 @@ export class BuildError extends Error {
   }
 }
 
-export async function buildProductsFromRequest(request: Request): Promise<BuildResult> {
+export async function buildProductsFromRequest(
+  request: Request,
+  /**
+   * Who is asking. Required, and it is a security argument rather than a
+   * convenience: `fromCrawl` reads a run's staged products by id, and without
+   * the owner any signed-in account could name another account's crawl and walk
+   * off with their catalogue.
+   */
+  ownerId: string,
+): Promise<BuildResult> {
   const form = await request.formData();
 
   const rawOptions = form.get("options");
@@ -68,7 +78,16 @@ export async function buildProductsFromRequest(request: Request): Promise<BuildR
   }
 
   const options = parsed.data;
-  const source = await fromCsv(form, options);
+
+  /*
+   * Which source. A crawl id or a file — never both, and the id wins if somebody
+   * sends both, because it is the more specific request.
+   */
+  const crawlJobId = form.get("crawlJobId");
+  const source =
+    typeof crawlJobId === "string" && crawlJobId.trim() !== ""
+      ? await fromCrawl(crawlJobId.trim(), ownerId)
+      : await fromCsv(form, options);
 
   // Which rows arrived WITHOUT a SKU. Recorded before the transform, because
   // afterwards a generated SKU is indistinguishable from a real one.
@@ -251,5 +270,49 @@ async function fromCsv(form: FormData, options: ImportOptions): Promise<SourceRe
     warnings: parsed.skippedRows > 0 ? [`Skipped ${parsed.skippedRows} unreadable row(s).`] : [],
     errors: parsed.errors,
     skippedRows: parsed.skippedRows,
+  };
+}
+
+/**
+ * Products a crawl already found.
+ *
+ * The whole reason the crawler is a SOURCE rather than a feature: from here down
+ * a crawled product is indistinguishable from a CSV row, so `applyOptions`, the
+ * preview, the review step and the import job need no idea that crawling exists.
+ *
+ * `dialect`, `columns` and `signature` are null and empty because they are CSV
+ * facts. The wizard's column mapper keys off `columns`, and an empty list is
+ * what makes it correctly not offer to map anything.
+ */
+async function fromCrawl(jobId: string, ownerId: string): Promise<SourceResult> {
+  const job = await getJobState(jobId);
+
+  if (job === null || job.createdBy !== ownerId || job.kind !== "crawl") {
+    // One message for all three, on purpose: telling the difference between "no
+    // such run" and "not yours" tells a caller whether an id exists.
+    throw new BuildError("That crawl could not be found.", 404);
+  }
+
+  if (job.status !== "completed") {
+    throw new BuildError(
+      `That crawl is "${job.status}". Wait for it to finish before importing what it found.`,
+    );
+  }
+
+  const products = await getJobProducts(jobId);
+
+  if (products.length === 0) {
+    throw new BuildError("That crawl found no products.");
+  }
+
+  return {
+    products,
+    sourceLabel: job.storeLabel,
+    dialect: null,
+    columns: [],
+    signature: null,
+    warnings: [],
+    errors: [],
+    skippedRows: 0,
   };
 }

@@ -1,0 +1,16 @@
+{
+  "id": 45,
+  "name": "Linen Shirt - S",
+  "sku": "SHIRT-S",
+  "type": "variation",
+  "prices": {
+    "price": "4900",
+    "regular_price": "5900",
+    "sale_price": "4900",
+    "currency_code": "USD",
+    "currency_minor_unit": 2
+  },
+  "is_in_stock": true,
+  "images": [{ "id": 13, "src": "https://shop.example/wp-content/uploads/shirt-s.jpg" }],
+  "attributes": [{ "name": "Size", "value": "S" }]
+}

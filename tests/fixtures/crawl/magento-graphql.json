@@ -1,0 +1,49 @@
+{
+  "data": {
+    "products": {
+      "total_count": 2,
+      "page_info": { "current_page": 1, "page_size": 50, "total_pages": 1 },
+      "items": [
+        {
+          "__typename": "SimpleProduct",
+          "sku": "MUG-24",
+          "name": "Stoneware Mug",
+          "url_key": "stoneware-mug",
+          "stock_status": "IN_STOCK",
+          "description": { "html": "<p>Heavy.</p>" },
+          "short_description": { "html": "<p>Heavy mug.</p>" },
+          "image": { "url": "https://m2.example/media/catalog/product/mug.jpg" },
+          "media_gallery": [
+            { "url": "https://m2.example/media/catalog/product/mug.jpg" },
+            { "url": "https://m2.example/media/catalog/product/mug-2.jpg" }
+          ],
+          "categories": [{ "name": "Kitchen" }],
+          "price_range": {
+            "minimum_price": {
+              "regular_price": { "value": 24, "currency": "USD" },
+              "final_price": { "value": 19.5, "currency": "USD" }
+            }
+          }
+        },
+        {
+          "__typename": "SimpleProduct",
+          "sku": "PLATE-01",
+          "name": "Side Plate",
+          "url_key": "side-plate",
+          "stock_status": "OUT_OF_STOCK",
+          "description": { "html": "" },
+          "short_description": { "html": "" },
+          "image": null,
+          "media_gallery": [],
+          "categories": [],
+          "price_range": {
+            "minimum_price": {
+              "regular_price": { "value": 8, "currency": "USD" },
+              "final_price": { "value": 8, "currency": "USD" }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
