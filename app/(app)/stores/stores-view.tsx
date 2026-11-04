@@ -8,6 +8,7 @@ import {
   Alert,
   Badge,
   Button,
+  ButtonLink,
   ConfirmDialog,
   DataTable,
   EmptyState,
@@ -36,10 +37,13 @@ import { StoreForm } from "./store-form";
 export function StoresView({
   initial,
   expectedPluginVersion,
+  pluginDownload,
   autoCheck,
 }: {
   initial: PublicStore[];
   expectedPluginVersion: string | null;
+  /** The zip this app can hand out, or null when none is installed alongside it. */
+  pluginDownload: { version: string } | null;
   autoCheck: boolean;
 }) {
   const router = useRouter();
@@ -389,6 +393,20 @@ export function StoresView({
             >
               Check them all
             </Button>
+            {pluginDownload === null ? null : (
+              // A plain download, not a navigation: `prefetch` off so the 400 KB zip is
+              // not fetched just because the Sites screen was opened.
+              <ButtonLink
+                href="/api/plugin/download"
+                download
+                prefetch={false}
+                variant="secondary"
+                size="sm"
+                icon="download"
+              >
+                Download plugin {pluginDownload.version}
+              </ButtonLink>
+            )}
             <Button variant="primary" size="sm" icon="plus" onClick={() => setFormFor(null)}>
               Connect a site
             </Button>

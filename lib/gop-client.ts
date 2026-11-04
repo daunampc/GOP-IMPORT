@@ -340,10 +340,31 @@ export class GopApiError extends Error {
     readonly status: number,
     readonly code: string,
     message: string,
+    /**
+     * The site's own clock, in epoch seconds, sent with `stale_request` (plugin 3.10.1
+     * onward). Absent on every other error and on older plugins.
+     */
+    readonly serverTime?: number,
   ) {
     super(message);
     this.name = 'GopApiError';
   }
+}
+
+/**
+ * How far each site's clock is from this machine's, in seconds, learned from a
+ * `stale_request` answer and remembered for the life of the process.
+ *
+ * Module-level rather than per client because the worker builds a client per run:
+ * a per-client value would be learned again, at the price of one wasted request,
+ * at the start of every run against the same site. Keyed by base URL because two
+ * sites have two clocks.
+ */
+const clockOffsets = new Map<string, number>();
+
+/** Cleared by the tests; nothing in the app needs to call this. */
+export function resetClockOffsets(): void {
+  clockOffsets.clear();
 }
 
 /**
@@ -799,6 +820,42 @@ export class GopClient {
     route: string,
     body?: unknown,
   ): Promise<T> {
+    try {
+      return await this.send<T>(method, route, body);
+    } catch (error) {
+      /*
+       * The site's clock and this machine's differ by more than the five minutes the
+       * plugin allows. A site on plugin 3.10.1+ says so, and says what time it is,
+       * but only after checking the signature — so this fires for a caller that holds
+       * the right secret, never for a wrong one.
+       *
+       * Retried ONCE, and safe for a write: the plugin refuses at authentication,
+       * before it has read the body, so nothing was applied and nothing can be
+       * applied twice. A second `stale_request` is thrown as it is rather than
+       * looped on, because it means the correction did not help.
+       */
+      if (
+        error instanceof GopApiError &&
+        error.code === 'stale_request' &&
+        error.serverTime !== undefined
+      ) {
+        clockOffsets.set(
+          this.site.baseUrl,
+          error.serverTime - Math.floor(Date.now() / 1000),
+        );
+
+        return await this.send<T>(method, route, body);
+      }
+
+      throw error;
+    }
+  }
+
+  private async send<T>(
+    method: 'GET' | 'POST',
+    route: string,
+    body?: unknown,
+  ): Promise<T> {
     const binary = Buffer.isBuffer(body);
 
     const payload: Buffer =
@@ -808,7 +865,10 @@ export class GopClient {
           ? body
           : Buffer.from(JSON.stringify(body), 'utf8');
 
-    const timestamp = Math.floor(Date.now() / 1000).toString();
+    // The site's clock, as far as this process has learned it. Zero until a site has
+    // said otherwise.
+    const offset = clockOffsets.get(this.site.baseUrl) ?? 0;
+    const timestamp = (Math.floor(Date.now() / 1000) + offset).toString();
 
     /*
      * The signature covers the route but NOT the query string — it has to match how
@@ -939,11 +999,16 @@ export class GopClient {
     // 207 means the batch had individual row failures. That is NOT a request
     // error — return it so the caller can read the rows.
     if (!response.ok && response.status !== 207) {
-      const error = (parsed as { error?: { code?: string; message?: string } }).error;
+      const error = (
+        parsed as { error?: { code?: string; message?: string; server_time?: unknown } }
+      ).error;
       throw new GopApiError(
         response.status,
         error?.code ?? 'unknown',
         error?.message ?? `HTTP ${response.status}`,
+        typeof error?.server_time === 'number' && Number.isFinite(error.server_time)
+          ? error.server_time
+          : undefined,
       );
     }
 
