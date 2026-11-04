@@ -45,7 +45,49 @@ const MAX_REDIRECTS = 3;
  * Kept as this module's error type so a caller has one thing to catch, whether the
  * refusal came from the URL rule or from the response.
  */
-export class ImageDownloadError extends Error {}
+export class ImageDownloadError extends Error {
+  constructor(
+    message: string,
+    /**
+     * The HTTP status the source answered, when the failure was an answer.
+     *
+     * Absent for this module's OWN refusals — a URL that resolves somewhere internal,
+     * an HTML page where a picture should be, a body over the size limit. Those never
+     * get better by asking again, and the difference between "the source said no" and
+     * "this app said no" is what `lib/image-retry.ts` classifies on.
+     */
+    readonly status?: number,
+    /** How long the source asked callers to wait (`Retry-After`), in ms. */
+    readonly retryAfterMs?: number,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * `Retry-After` as milliseconds: either a number of seconds or an HTTP date.
+ *
+ * `null` for anything else, including a date already in the past — the caller then
+ * falls back to its own backoff rather than waiting zero.
+ */
+export function parseRetryAfter(value: string | null, now: number = Date.now()): number | null {
+  if (value === null) {
+    return null;
+  }
+
+  const trimmed = value.trim();
+
+  if (/^\d+$/.test(trimmed)) {
+    return Number(trimmed) * 1000;
+  }
+
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) {
+    return null;
+  }
+
+  return date > now ? date - now : null;
+}
 
 export interface DownloadedImage {
   sourceUrl: string;
@@ -134,7 +176,11 @@ async function download(
   }
 
   if (!response.ok) {
-    throw new ImageDownloadError(`HTTP ${response.status} fetching the image`);
+    throw new ImageDownloadError(
+      `HTTP ${response.status} fetching the image`,
+      response.status,
+      parseRetryAfter(response.headers.get("retry-after")) ?? undefined,
+    );
   }
 
   const contentType = (response.headers.get("content-type") ?? "").split(";")[0].trim().toLowerCase();

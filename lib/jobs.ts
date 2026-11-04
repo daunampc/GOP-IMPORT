@@ -557,6 +557,8 @@ export async function applyBatch(
     failed: number;
     deduplicated: number;
     pluginElapsedMs: number;
+    /** Batches this counts as. 1 unless it is not one — the end-of-run image pass is 0. */
+    batches?: number;
   },
 ): Promise<JobState | null> {
   const [row] = await db
@@ -566,7 +568,7 @@ export async function applyBatch(
       succeeded: sql`${jobsTable.succeeded} + ${delta.succeeded}`,
       failed: sql`${jobsTable.failed} + ${delta.failed}`,
       deduplicated: sql`${jobsTable.deduplicated} + ${delta.deduplicated}`,
-      batchesDone: sql`${jobsTable.batchesDone} + 1`,
+      batchesDone: sql`${jobsTable.batchesDone} + ${delta.batches ?? 1}`,
       pluginElapsedMs: sql`${jobsTable.pluginElapsedMs} + ${delta.pluginElapsedMs}`,
     })
     .where(eq(jobsTable.id, id))

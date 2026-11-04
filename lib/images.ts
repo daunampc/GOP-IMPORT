@@ -5,6 +5,13 @@
 import type { ImportOptions } from "./import-options";
 import type { Product, GopClient } from "./gop-client";
 import { downloadLanes } from "./download-limit";
+import {
+  HostGate,
+  THROTTLE_ATTEMPTS,
+  TRANSIENT_DELAYS_MS,
+  backoffMs,
+  classifyImageError,
+} from "./image-retry";
 import { ImageDownloadError, downloadImage, type DownloadedImage } from "./image-download";
 import {
   MAX_UPLOAD_ENTRIES,
@@ -88,6 +95,12 @@ export interface HeldProduct {
   urls: string[];
   /** The first cause, for the row's message. */
   error: string;
+  /**
+   * True when an image of this product will fail again however often it is asked — a
+   * dead link, a file over the limit. The end-of-run pass skips these: waiting a
+   * minute for a 404 to turn into a 200 is not a plan.
+   */
+  permanent: boolean;
 }
 
 /**
@@ -96,19 +109,38 @@ export interface HeldProduct {
  */
 export interface S3StageDeps {
   uploader?: (credentials: S3Credentials) => Pick<S3Uploader, "upload" | "destroy">;
-  /** Waits between attempts at one image, in ms. One entry per retry. */
+  /** Waits between attempts at an ordinary (non-throttled) failure, in ms. */
   retryDelaysMs?: number[];
+  /** Throttled answers one image absorbs before it is parked. */
+  throttleAttempts?: number;
+  /** Shared pause and pace per host. Defaults to one per run, kept beside the cache. */
+  gate?: HostGate;
+  /** The run's own signal: a Stop ends a wait immediately. */
+  signal?: AbortSignal;
+  /** Told once per new pause, so the run's log can say what is happening. */
+  onPause?: (event: { key: string; waitMs: number; limit: number }) => void;
+  random?: () => number;
 }
 
 /**
- * Pauses between the attempts at one image headed for the bucket.
+ * One gate per run, found from the run's cache.
  *
- * Three attempts in all. An overloaded source, a throttled bucket (503 SlowDown) or a
- * dropped connection mostly clears in seconds, and a retry that waits is what makes
- * the difference between a product that publishes now and one that has to be resent.
- * Anything still failing after this is parked for a later run, not linked.
+ * Kept beside the cache rather than passed down every call: the cache is already the
+ * one object every batch of a run shares, and a gate that was NOT shared would be a
+ * gate per batch — which is no gate, since a batch is over before the pause matters.
  */
-const S3_RETRY_DELAYS_MS = [1_000, 4_000];
+const gates = new WeakMap<ImageCache, HostGate>();
+
+function gateFor(cache: ImageCache): HostGate {
+  let gate = gates.get(cache);
+
+  if (gate === undefined) {
+    gate = new HostGate(downloadLanes());
+    gates.set(cache, gate);
+  }
+
+  return gate;
+}
 
 export interface ImageFailure {
   url: string;
@@ -125,6 +157,8 @@ export interface ImageFailure {
    * "your site's uploads directory is read-only" read identically in the log.
    */
   reason: "download" | "upload";
+  /** Asking again will not help (a 404, a refused file). Absent means worth another go. */
+  permanent?: boolean;
 }
 
 /**
@@ -188,6 +222,7 @@ export interface StagedImage {
   url: string | null;
   error?: string;
   reason?: "download" | "upload";
+  permanent?: boolean;
 }
 
 export function createImageCache(): ImageCache {
@@ -446,7 +481,14 @@ async function stageToS3(
   stats.fromCache = urls.length - fresh.length;
 
   const uploader = deps.uploader?.(credentials) ?? new S3Uploader(credentials);
-  const delays = deps.retryDelaysMs ?? S3_RETRY_DELAYS_MS;
+  const resilience: Resilience = {
+    gate: deps.gate ?? gateFor(cache),
+    delays: deps.retryDelaysMs ?? TRANSIENT_DELAYS_MS,
+    throttleAttempts: deps.throttleAttempts ?? THROTTLE_ATTEMPTS,
+    signal: deps.signal,
+    onPause: deps.onPause,
+    random: deps.random ?? Math.random,
+  };
   const settlers = new Map<string, (image: StagedImage) => void>();
 
   for (const url of fresh) {
@@ -464,7 +506,7 @@ async function stageToS3(
 
     await inLanes(fresh, downloadLanes(), async (url) => {
       try {
-        settle(settlers, url, { url: await uploadWithRetry(uploader, url, delays) });
+        settle(settlers, url, { url: await uploadResilient(uploader, url, resilience) });
         stats.uploaded++;
       } catch (error) {
         // The whole hop is this process's own work — fetch then put — so the split
@@ -472,8 +514,9 @@ async function stageToS3(
         // available here. An S3 failure is reported as a download failure because
         // that is what it almost always is.
         const message = messageOf(error);
-        failures.push({ url, error: message, reason: "download" });
-        settle(settlers, url, { url: null, error: message, reason: "download" });
+        const permanent = error instanceof ImageStageError && error.permanent;
+        failures.push({ url, error: message, reason: "download", permanent });
+        settle(settlers, url, { url: null, error: message, reason: "download", permanent });
       }
     });
 
@@ -488,27 +531,106 @@ async function stageToS3(
   }
 }
 
-/** One image to the bucket, with the pauses in `delays` between attempts. */
-async function uploadWithRetry(
+interface Resilience {
+  gate: HostGate;
+  delays: number[];
+  throttleAttempts: number;
+  signal: AbortSignal | undefined;
+  onPause: S3StageDeps["onPause"];
+  random: () => number;
+}
+
+/** A staging failure that says whether another attempt is pointless. */
+class ImageStageError extends Error {
+  constructor(
+    message: string,
+    readonly permanent: boolean,
+  ) {
+    super(message);
+  }
+}
+
+/**
+ * One image to the bucket, retried according to WHY it failed.
+ *
+ *  - throttled (429 from the source, `SlowDown` from the bucket): tried again in place,
+ *    up to `throttleAttempts` times, each wait taken from the server's `Retry-After` or
+ *    a growing backoff — and taken through the shared gate, so every other lane
+ *    reaching that host waits too and the host's lane count is cut;
+ *  - transient (timeout, 5xx, dropped connection): the short fixed pauses;
+ *  - permanent (404, a refused file): not retried at all.
+ *
+ * A lane asleep on a backoff holds no slot: the gate is released before the wait.
+ */
+async function uploadResilient(
   uploader: Pick<S3Uploader, "upload">,
   url: string,
-  delays: number[],
+  options: Resilience,
 ): Promise<string> {
-  let last: unknown;
+  const { gate } = options;
+  const keys = [hostOf(url), "bucket"];
 
-  for (let attempt = 0; attempt <= delays.length; attempt++) {
+  let throttled = 0;
+  let transient = 0;
+
+  for (;;) {
+    const release = await gate.acquire(keys, options.signal);
+
+    let failure: unknown;
+
     try {
-      return await uploader.upload(url);
+      const result = await uploader.upload(url);
+      gate.succeeded(keys);
+      return result;
     } catch (error) {
-      last = error;
-
-      if (attempt < delays.length) {
-        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
-      }
+      failure = error;
+    } finally {
+      release();
     }
-  }
 
-  throw last;
+    const kind = classifyImageError(failure);
+    const message = messageOf(failure);
+
+    if (kind.kind === "permanent") {
+      throw new ImageStageError(message, true);
+    }
+
+    if (kind.kind === "throttled") {
+      throttled++;
+
+      const key = kind.origin === "bucket" ? "bucket" : hostOf(url);
+      const waitMs = backoffMs(throttled, kind.retryAfterMs, options.random);
+
+      if (gate.throttled(key, waitMs)) {
+        options.onPause?.({ key, waitMs, limit: gate.snapshot(key).limit });
+      }
+
+      if (throttled >= options.throttleAttempts) {
+        throw new ImageStageError(
+          `still rate-limited after ${throttled} attempts (${message})`,
+          false,
+        );
+      }
+
+      continue;
+    }
+
+    transient++;
+
+    if (transient > options.delays.length) {
+      throw new ImageStageError(message, false);
+    }
+
+    await gate.clock.sleep(options.delays[transient - 1], options.signal);
+  }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
 }
 
 /**
@@ -539,6 +661,7 @@ async function finish(
 
   const mapping = new Map<string, string>();
   const errors = new Map<string, string>();
+  const permanentUrls = new Set<string>();
 
   await Promise.all(
     urls.map(async (url) => {
@@ -548,6 +671,10 @@ async function finish(
         mapping.set(url, staged.url);
       } else {
         errors.set(url, staged?.error ?? "The image could not be staged");
+
+        if (staged?.permanent === true) {
+          permanentUrls.add(url);
+        }
       }
     }),
   );
@@ -577,6 +704,7 @@ async function finish(
           index,
           urls: unresolved,
           error: errors.get(unresolved[0]) ?? "The image could not be staged",
+          permanent: unresolved.some((url) => permanentUrls.has(url)),
         });
       }
     });

@@ -426,24 +426,314 @@ async function logImageCost(
 /**
  * The failed row for a product held back because an image would not go to S3.
  *
- * A row, not a skip: it is the thing "Resend failed rows" reads, which is what turns
- * "queue it for a later run" into one click instead of a promise. The code is stable
- * on purpose so the results table and the CSV export can tell it from a site error.
+ * Two codes, because they ask for different things from the operator:
+ *
+ *  - `image_unavailable` — the image itself is the problem (a dead link, a file that is
+ *    not a picture). Waiting changes nothing; the feed has to be fixed.
+ *  - `image_upload_pending` — the image should have gone and did not, even after the
+ *    retries and the end-of-run pass. The bucket or the source was struggling, and
+ *    **Resend failed rows** is the way to run it again later.
+ *
+ * Either way it is a ROW, not a skip: it is what "Resend failed rows" reads. And either
+ * way the product was not published with the source's own links — S3 mode never does.
  */
 function heldResult(index: number, held: HeldProduct, sku: string | undefined): ImportResult {
   return {
     index,
     ok: false,
     sku: sku === undefined || sku === "" ? undefined : sku,
-    error: {
-      code: "image_upload_pending",
-      message:
-        `Not published: ${held.urls.length} image(s) could not be uploaded to S3 (${held.error}). ` +
-        'Image handling is "Upload to Amazon S3", so this product is never published with the ' +
-        "source's own links. It is queued for a later run — use Resend failed rows once the " +
-        "bucket or the source recovers.",
+    error: held.permanent
+      ? {
+          code: "image_unavailable",
+          message:
+            `Not published: ${held.urls.length} image(s) cannot be read from the source (${held.error}). ` +
+            'Image handling is "Upload to Amazon S3", so this product is never published with the ' +
+            "source's own links. Asking again will not help — fix the image or its link in the feed.",
+        }
+      : {
+          code: "image_upload_pending",
+          message:
+            `Not published: ${held.urls.length} image(s) could not be uploaded to S3 (${held.error}) ` +
+            "even after retrying and a final pass at the end of the run. Image handling is " +
+            '"Upload to Amazon S3", so this product is never published with the source\'s own links. ' +
+            "Use Resend failed rows once the bucket or the source has recovered.",
+        },
+  };
+}
+
+/**
+ * Products waiting for the end of the run.
+ *
+ * A product whose image would not upload is NOT recorded as failed straight away. It is
+ * put here, and everything else carries on; when the last batch has gone, these are
+ * tried again once the hosts have had time to recover. Only what still fails then
+ * becomes a failed row. Not recorded in the meantime — so no row has to be corrected
+ * afterwards and the counters never move twice for one product.
+ */
+interface DeferredQueue {
+  /** The run's own signal, so a Stop ends a wait on a rate-limited host. */
+  signal: AbortSignal;
+  items: Array<{ index: number; product: Product; held: HeldProduct }>;
+}
+
+/** The pause before the first retry pass, and between passes. */
+const DEFERRED_COOLDOWN_MS = Number(process.env.GOP_IMAGE_FINAL_PASS_DELAY_MS ?? 60_000);
+
+/** How many times the end-of-run pass goes over what is still held. */
+const DEFERRED_ROUNDS = 2;
+
+/** What `stageImages` needs from the run: the Stop signal, and a log line per pause. */
+function imageDeps(jobId: string, signal: AbortSignal) {
+  return {
+    signal,
+    onPause: ({ key, waitMs, limit }: { key: string; waitMs: number; limit: number }) => {
+      // Fire and forget: a log line must never be able to fail an import.
+      void logJob(jobId, {
+        level: "warn",
+        stage: "images",
+        message:
+          `${key === "bucket" ? "The S3 bucket" : key} asked this run to slow down. Every lane ` +
+          `reaching it now waits ${Math.round(waitMs / 1000)}s, and it gets ${limit} lane(s) ` +
+          `instead of the full number until it stops refusing.`,
+        detail: { host: key, waitMs, lanes: limit },
+      });
     },
   };
+}
+
+/**
+ * Decide what happens to the products an S3 batch held back.
+ *
+ * A permanent failure becomes a failed row now. Anything else goes on the queue for the
+ * end of the run and produces NO row yet — see `DeferredQueue`.
+ */
+function settleHeld(
+  held: HeldProduct[],
+  deferred: DeferredQueue,
+  offset: number,
+  productAt: (heldIndex: number) => Product,
+  positionOf: (heldIndex: number) => number = (heldIndex) => heldIndex,
+): ImportResult[] {
+  const rows: ImportResult[] = [];
+
+  for (const entry of held) {
+    const product = productAt(entry.index);
+    const index = offset + positionOf(entry.index);
+
+    if (entry.permanent) {
+      rows.push(heldResult(index, entry, product?.sku));
+    } else {
+      deferred.items.push({ index, product, held: entry });
+    }
+  }
+
+  return rows;
+}
+
+/** Record held products as failed rows and count them. */
+async function failDeferred(
+  jobId: string,
+  items: DeferredQueue["items"],
+  options: ImportOptions,
+): Promise<void> {
+  if (items.length === 0) {
+    return;
+  }
+
+  const rows: RunResult[] = items.map((item) => ({
+    ...heldResult(item.index, item.held, item.product.sku),
+    action: options.writeMode === "skip" ? undefined : "created",
+  }));
+
+  await appendResults(jobId, rows);
+  await applyBatch(jobId, {
+    processed: rows.length,
+    succeeded: 0,
+    failed: rows.length,
+    deduplicated: 0,
+    pluginElapsedMs: 0,
+    batches: 0,
+  });
+  await logJob(
+    jobId,
+    rows.map((row) => ({
+      level: "warn" as const,
+      stage: "plugin" as const,
+      message: `Row ${row.index + 1}${row.sku ? ` (${row.sku})` : ""} failed: ${row.error?.code} — ${row.error?.message}`,
+      detail: { row: row.index, sku: row.sku ?? null, code: row.error?.code ?? null },
+    })),
+  );
+}
+
+/**
+ * The end of the run: try again what S3 would not take.
+ *
+ * Every product whose image was still being refused after its retries was set aside
+ * instead of failed. By now every other batch has gone, the hosts have had their
+ * breathing space, and a pause is added on top of that. Up to `DEFERRED_ROUNDS` goes
+ * over what is left; whatever still will not upload is recorded as a failed row and is
+ * Resend failed rows' to deal with — and is not published with a source link.
+ *
+ * Counted as the run goes, not corrected after: a product is recorded exactly once,
+ * here, as either a success or a failure, so nothing it did earlier has to be undone.
+ */
+async function runDeferredPass(
+  jobId: string,
+  queue: DeferredQueue,
+  options: ImportOptions,
+  client: GopClient,
+  s3: S3Credentials | null,
+  imageCache: ImageCache,
+  batchSize: number,
+  outcome: { cancelled: boolean; mode: CancelMode | null; succeeded: number },
+): Promise<void> {
+  if (queue.items.length === 0) {
+    return;
+  }
+
+  const total = queue.items.length;
+  let waiting = queue.items;
+  let recovered = 0;
+
+  const failRows = (items: DeferredQueue["items"]): Promise<void> => failDeferred(jobId, items, options);
+
+  await logJob(jobId, {
+    level: "warn",
+    stage: "images",
+    message:
+      `${total} product(s) were held back because S3 kept refusing their images. They are retried ` +
+      `now that every other batch is done — after a ${Math.round(DEFERRED_COOLDOWN_MS / 1000)}s ` +
+      `pause, up to ${DEFERRED_ROUNDS} time(s). Their rows are recorded when that finishes.`,
+    detail: { held: total, rounds: DEFERRED_ROUNDS, cooldownMs: DEFERRED_COOLDOWN_MS },
+  });
+
+  for (let round = 1; round <= DEFERRED_ROUNDS && waiting.length > 0; round++) {
+    const asked = await waitBeforeRetry(jobId, DEFERRED_COOLDOWN_MS);
+
+    if (asked.requested) {
+      // Not left unrecorded: they are failed rows, so Resend can pick them up.
+      outcome.cancelled = true;
+      outcome.mode = asked.mode;
+      await logJob(jobId, {
+        level: "warn",
+        stage: "cancel",
+        message:
+          `${asked.mode === "stop" ? "Stop" : "Cancel"} was asked for while ${waiting.length} held ` +
+          `product(s) waited for their final pass. They are recorded as failed rows, not retried.`,
+        detail: { waiting: waiting.length },
+      });
+      await failRows(waiting);
+      return;
+    }
+
+    const stillHeld: DeferredQueue["items"] = [];
+    const last = round === DEFERRED_ROUNDS;
+
+    for (let at = 0; at < waiting.length; at += batchSize) {
+      const chunk = waiting.slice(at, at + batchSize);
+
+      try {
+        const staged = await stageImages(
+          chunk.map((item) => item.product),
+          options,
+          client,
+          s3,
+          imageCache,
+          imageDeps(jobId, queue.signal),
+        );
+
+        const toSend = sendable(staged);
+
+        const sent =
+          toSend.products.length === 0 ? [] : await client.importProducts(toSend.products);
+
+        const rows: RunResult[] = sent.map((result) => ({
+          ...result,
+          index: chunk[toSend.positions[result.index]].index,
+          action: options.writeMode === "skip" ? undefined : ("created" as const),
+        }));
+
+        const ok = rows.filter((row) => row.ok).length;
+        const deduplicated = rows.filter((row) => row.ok && row.deduplicated).length;
+
+        recovered += ok;
+        outcome.succeeded += ok;
+
+        await appendResults(jobId, rows);
+        await applyBatch(jobId, {
+          processed: rows.length,
+          succeeded: ok,
+          failed: rows.length - ok,
+          deduplicated,
+          pluginElapsedMs: 0,
+          batches: 0,
+        });
+
+        for (const entry of staged.held) {
+          const item = chunk[entry.index];
+          const again = { ...item, held: entry };
+
+          if (entry.permanent || last) {
+            await failRows([again]);
+          } else {
+            stillHeld.push(again);
+          }
+        }
+      } catch (error) {
+        if (error instanceof GopAbortError) {
+          outcome.cancelled = true;
+          outcome.mode = "stop";
+          await logJob(jobId, {
+            level: "warn",
+            stage: "cancel",
+            message: "Stop abandoned the end-of-run image pass in flight.",
+          });
+          return;
+        }
+
+        // The site (or something else) failed the whole chunk: its rows fail with that
+        // cause, like any batch that dies — they are not turned into image failures.
+        const failure = describeFailure(error);
+        const rows: RunResult[] = chunk.map((item) => ({
+          index: item.index,
+          ok: false,
+          sku: item.product.sku,
+          error: failure,
+        }));
+
+        await appendResults(jobId, rows);
+        await applyBatch(jobId, {
+          processed: rows.length,
+          succeeded: 0,
+          failed: rows.length,
+          deduplicated: 0,
+          pluginElapsedMs: 0,
+          batches: 0,
+        });
+      }
+    }
+
+    await logJob(jobId, {
+      level: stillHeld.length === 0 ? "info" : "warn",
+      stage: "images",
+      message:
+        `Final image pass ${round} of ${DEFERRED_ROUNDS}: ${waiting.length - stillHeld.length} of ` +
+        `${waiting.length} product(s) done` +
+        (stillHeld.length === 0 ? "." : `, ${stillHeld.length} still held${last ? "" : " — going again"}.`),
+      detail: { round, tried: waiting.length, stillHeld: stillHeld.length },
+    });
+
+    waiting = stillHeld;
+  }
+
+  await logJob(jobId, {
+    level: recovered === total ? "info" : "warn",
+    stage: "images",
+    message:
+      `End-of-run image pass: ${recovered} of ${total} held product(s) published, ` +
+      `${total - recovered} recorded as failed rows for Resend failed rows.`,
+    detail: { held: total, recovered, failed: total - recovered },
+  });
 }
 
 /** What to send, and where each sendable product sat in the staged batch. */
@@ -492,8 +782,8 @@ async function logImageFailures(
     message:
       held > 0
         ? `${failures.length} image(s) could not be uploaded to S3 (${parts.join("; ")}) after ` +
-          `retrying. ${held} product(s) were NOT published — S3 never falls back to the source's ` +
-          `links — and are recorded as failed rows for Resend failed rows.`
+          `retrying. ${held} product(s) are held back and NOT published — S3 never falls back to ` +
+          `the source's links. Ones worth another go are retried once the run's batches are done.`
         : `${failures.length} image(s) could not be staged (${parts.join("; ")}); the original URLs ` +
           `were kept so the products still publish.`,
     // URLs only, truncated: enough to recognise the pattern without turning the
@@ -618,6 +908,12 @@ async function runImport(
    */
   const imageCache = createImageCache();
 
+  // Products set aside for the end of the run — see `DeferredQueue`.
+  const deferred: DeferredQueue = {
+    signal: inFlight.get(jobId)?.signal ?? new AbortController().signal,
+    items: [],
+  };
+
   // Process-wide counters, so the summary below reports THIS run rather than the
   // lifetime of the worker.
   resetDownloadStats();
@@ -667,12 +963,19 @@ async function runImport(
        * the answer is at most one batch old.
        */
       if (options.writeMode !== "skip") {
-        return runWriteMode(jobId, batch, offset, options, client, batchSize, s3, imageCache);
+        return runWriteMode(jobId, batch, offset, options, client, batchSize, s3, imageCache, deferred);
       }
 
       // Image handling happens per batch so this batch's images are ready
       // before its products are created.
-      const staged = await stageImages(batch, options, client, s3, imageCache);
+      const staged = await stageImages(
+        batch,
+        options,
+        client,
+        s3,
+        imageCache,
+        imageDeps(jobId, deferred.signal),
+      );
 
       await logImageCost(jobId, Math.floor(offset / batchSize), staged.stats);
       await logImageFailures(jobId, Math.floor(offset / batchSize), staged.failures, staged.held.length);
@@ -698,7 +1001,7 @@ async function runImport(
             ...result,
             index: toSend.positions[result.index] + offset,
           })),
-          ...staged.held.map((held) => heldResult(offset + held.index, held, batch[held.index]?.sku)),
+          ...settleHeld(staged.held, deferred, offset, (position) => batch[position]),
         ].sort((left, right) => left.index - right.index),
         pluginElapsedMs,
       };
@@ -710,6 +1013,15 @@ async function runImport(
         error: failure,
       })),
   });
+
+  // Before the finish line is written, so it counts what the pass recovered.
+  if (!outcome.cancelled) {
+    await runDeferredPass(jobId, deferred, options, client, s3, imageCache, batchSize, outcome);
+  } else {
+    // Cancelled with products still set aside: recorded as failed rows, not dropped,
+    // so Resend failed rows can pick them up.
+    await failDeferred(jobId, deferred.items, options);
+  }
 
   await logFinish(jobId, outcome, state);
   await settleRun(jobId, outcome.cancelled ? "cancelled" : "completed", stopNote(outcome));
@@ -778,6 +1090,7 @@ async function runWriteMode(
   batchSize: number,
   s3: S3Credentials | null,
   imageCache: ImageCache,
+  deferred: DeferredQueue,
 ): Promise<{ results: RunResult[]; pluginElapsedMs: number | null }> {
   const batchIndex = Math.floor(offset / batchSize);
 
@@ -910,7 +1223,14 @@ async function runWriteMode(
     // Images are staged for the CREATE half only. An update never writes images,
     // so staging them for a row that is going to be updated would do the work and
     // then throw it away.
-    const staged = await stageImages(fresh, options, client, s3, imageCache);
+    const staged = await stageImages(
+      fresh,
+      options,
+      client,
+      s3,
+      imageCache,
+      imageDeps(jobId, deferred.signal),
+    );
 
     await logImageCost(jobId, batchIndex, staged.stats);
     await logImageFailures(jobId, batchIndex, staged.failures, staged.held.length);
@@ -936,16 +1256,10 @@ async function runWriteMode(
       results.push({ ...result, index: offset + position, action: "created" });
     }
 
-    // Held back, not sent: recorded against the row's own place in the file.
-    for (const held of staged.held) {
-      const position = toCreate[held.index];
-
-      if (position !== undefined) {
-        results.push({
-          ...heldResult(offset + position, held, batch[position]?.sku),
-          action: "created",
-        });
-      }
+    // Held back, not sent. A permanent one is a failed row now; the rest wait for the
+    // end of the run.
+    for (const row of settleHeld(staged.held, deferred, offset, (heldIndex) => batch[toCreate[heldIndex]], (heldIndex) => toCreate[heldIndex])) {
+      results.push({ ...row, action: "created" });
     }
   }
 
