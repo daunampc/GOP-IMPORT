@@ -39,6 +39,7 @@ import {
 import {
   createImageCache,
   stageImages,
+  type HeldProduct,
   type ImageCache,
   type ImageFailure,
   type ImageStageStats,
@@ -61,6 +62,7 @@ import {
   MAX_DELETE_BATCH,
   MAX_UPDATE_BATCH,
   type GopClient,
+  type ImportResult,
   type Product,
   type ProductUpdate,
 } from "../lib/gop-client";
@@ -421,10 +423,46 @@ async function logImageCost(
  * two need entirely different people to act. `download` is the source of the image;
  * `upload` is the target site.
  */
+/**
+ * The failed row for a product held back because an image would not go to S3.
+ *
+ * A row, not a skip: it is the thing "Resend failed rows" reads, which is what turns
+ * "queue it for a later run" into one click instead of a promise. The code is stable
+ * on purpose so the results table and the CSV export can tell it from a site error.
+ */
+function heldResult(index: number, held: HeldProduct, sku: string | undefined): ImportResult {
+  return {
+    index,
+    ok: false,
+    sku: sku === undefined || sku === "" ? undefined : sku,
+    error: {
+      code: "image_upload_pending",
+      message:
+        `Not published: ${held.urls.length} image(s) could not be uploaded to S3 (${held.error}). ` +
+        'Image handling is "Upload to Amazon S3", so this product is never published with the ' +
+        "source's own links. It is queued for a later run — use Resend failed rows once the " +
+        "bucket or the source recovers.",
+    },
+  };
+}
+
+/** What to send, and where each sendable product sat in the staged batch. */
+function sendable(staged: { products: Product[]; held: HeldProduct[] }): {
+  products: Product[];
+  positions: number[];
+} {
+  const heldAt = new Set(staged.held.map((held) => held.index));
+  const positions = staged.products.map((_product, index) => index).filter((index) => !heldAt.has(index));
+
+  return { products: positions.map((index) => staged.products[index]), positions };
+}
+
 async function logImageFailures(
   jobId: string,
   batchIndex: number,
   failures: ImageFailure[],
+  /** Products kept back from the site (`s3` mode). Zero in every other mode. */
+  held = 0,
 ): Promise<void> {
   if (failures.length === 0) {
     return;
@@ -442,7 +480,8 @@ async function logImageFailures(
   }
 
   console.warn(
-    `[worker] ${jobId}: ${failures.length} image(s) failed, keeping original URLs.`,
+    `[worker] ${jobId}: ${failures.length} image(s) failed` +
+      (held > 0 ? `, holding ${held} product(s) back.` : ", keeping original URLs."),
     failures.slice(0, 3),
   );
 
@@ -451,14 +490,19 @@ async function logImageFailures(
     stage: "images",
     batchIndex,
     message:
-      `${failures.length} image(s) could not be staged (${parts.join("; ")}); the original URLs ` +
-      `were kept so the products still publish.`,
+      held > 0
+        ? `${failures.length} image(s) could not be uploaded to S3 (${parts.join("; ")}) after ` +
+          `retrying. ${held} product(s) were NOT published — S3 never falls back to the source's ` +
+          `links — and are recorded as failed rows for Resend failed rows.`
+        : `${failures.length} image(s) could not be staged (${parts.join("; ")}); the original URLs ` +
+          `were kept so the products still publish.`,
     // URLs only, truncated: enough to recognise the pattern without turning the
     // log into a copy of the catalogue.
     detail: {
       failed: failures.length,
       download: download.length,
       upload: upload.length,
+      held,
       examples: failures.slice(0, 3),
     },
   });
@@ -631,19 +675,31 @@ async function runImport(
       const staged = await stageImages(batch, options, client, s3, imageCache);
 
       await logImageCost(jobId, Math.floor(offset / batchSize), staged.stats);
-      await logImageFailures(jobId, Math.floor(offset / batchSize), staged.failures);
+      await logImageFailures(jobId, Math.floor(offset / batchSize), staged.failures, staged.held.length);
 
       let pluginElapsedMs: number | null = null;
 
-      const results = await client.importProducts(staged.products, {
-        // Batches here are already <= the plugin cap, so this fires once.
-        onBatchDone: (batchResponse) => {
-          pluginElapsedMs = batchResponse.elapsed_ms;
-        },
-      });
+      // Products whose images would not go to S3 are not sent at all.
+      const toSend = sendable(staged);
+
+      const results =
+        toSend.products.length === 0
+          ? []
+          : await client.importProducts(toSend.products, {
+              // Batches here are already <= the plugin cap, so this fires once.
+              onBatchDone: (batchResponse) => {
+                pluginElapsedMs = batchResponse.elapsed_ms;
+              },
+            });
 
       return {
-        results: results.map((result) => ({ ...result, index: result.index + offset })),
+        results: [
+          ...results.map((result) => ({
+            ...result,
+            index: toSend.positions[result.index] + offset,
+          })),
+          ...staged.held.map((held) => heldResult(offset + held.index, held, batch[held.index]?.sku)),
+        ].sort((left, right) => left.index - right.index),
         pluginElapsedMs,
       };
     },
@@ -857,22 +913,39 @@ async function runWriteMode(
     const staged = await stageImages(fresh, options, client, s3, imageCache);
 
     await logImageCost(jobId, batchIndex, staged.stats);
-    await logImageFailures(jobId, batchIndex, staged.failures);
+    await logImageFailures(jobId, batchIndex, staged.failures, staged.held.length);
 
-    const created = await client.importProducts(staged.products, {
-      onBatchDone: (response) => {
-        pluginElapsedMs = (pluginElapsedMs ?? 0) + response.elapsed_ms;
-      },
-    });
+    const toSend = sendable(staged);
+
+    const created =
+      toSend.products.length === 0
+        ? []
+        : await client.importProducts(toSend.products, {
+            onBatchDone: (response) => {
+              pluginElapsedMs = (pluginElapsedMs ?? 0) + response.elapsed_ms;
+            },
+          });
 
     for (const result of created) {
-      const position = toCreate[result.index];
+      const position = toCreate[toSend.positions[result.index]];
 
       if (position === undefined) {
         continue;
       }
 
       results.push({ ...result, index: offset + position, action: "created" });
+    }
+
+    // Held back, not sent: recorded against the row's own place in the file.
+    for (const held of staged.held) {
+      const position = toCreate[held.index];
+
+      if (position !== undefined) {
+        results.push({
+          ...heldResult(offset + position, held, batch[position]?.sku),
+          action: "created",
+        });
+      }
     }
   }
 

@@ -62,10 +62,53 @@ const PROBE_CHUNK = 200;
 
 export interface ImageStageResult {
   products: Product[];
-  /** URLs that failed — the original link is kept, and the failure reported. */
+  /**
+   * URLs that failed. In `upload_site` the original link is kept and the product
+   * still publishes; in `s3` nothing is kept — see `held`.
+   */
   failures: ImageFailure[];
   stats: ImageStageStats;
+  /**
+   * Products that must NOT be sent, because an image they reference could not be put
+   * in the bucket. Only ever populated in `s3` mode; always empty otherwise.
+   *
+   * Indexes into the `products` array this call was given. The caller removes these
+   * from what it sends and records each as a failed row, which "Resend failed rows"
+   * then runs again later. The alternative — sending the product with the supplier's
+   * link where the bucket's should be — is exactly what choosing S3 is meant to rule
+   * out.
+   */
+  held: HeldProduct[];
 }
+
+export interface HeldProduct {
+  /** Position in the array passed to `stageImages`. */
+  index: number;
+  /** The source URLs that could not be staged. */
+  urls: string[];
+  /** The first cause, for the row's message. */
+  error: string;
+}
+
+/**
+ * What the S3 path needs from an uploader, so a test can stand in for the bucket.
+ * Production passes nothing and gets the real `S3Uploader`.
+ */
+export interface S3StageDeps {
+  uploader?: (credentials: S3Credentials) => Pick<S3Uploader, "upload" | "destroy">;
+  /** Waits between attempts at one image, in ms. One entry per retry. */
+  retryDelaysMs?: number[];
+}
+
+/**
+ * Pauses between the attempts at one image headed for the bucket.
+ *
+ * Three attempts in all. An overloaded source, a throttled bucket (503 SlowDown) or a
+ * dropped connection mostly clears in seconds, and a retry that waits is what makes
+ * the difference between a product that publishes now and one that has to be resent.
+ * Anything still failing after this is parked for a later run, not linked.
+ */
+const S3_RETRY_DELAYS_MS = [1_000, 4_000];
 
 export interface ImageFailure {
   url: string;
@@ -159,13 +202,15 @@ export async function stageImages(
   s3: S3Credentials | null,
   /** Shared across the run. Omitted, each call stands alone — as it used to. */
   cache: ImageCache = createImageCache(),
+  /** Only the tests pass this. */
+  deps: S3StageDeps = {},
 ): Promise<ImageStageResult> {
   if (options.imageMode === "s3") {
-    return stageToS3(products, s3, cache);
+    return stageToS3(products, s3, cache, deps);
   }
 
   if (options.imageMode !== "upload_site") {
-    return { products, failures: [], stats: emptyStats() };
+    return { products, failures: [], stats: emptyStats(), held: [] };
   }
 
   return stageToSite(products, client, cache);
@@ -198,7 +243,7 @@ async function stageToSite(
   const stats = emptyStats(urls.length);
 
   if (urls.length === 0) {
-    return { products, failures: [], stats };
+    return { products, failures: [], stats, held: [] };
   }
 
   const fresh = urls.filter((url) => !cache.has(url));
@@ -318,7 +363,7 @@ async function stageToSite(
     flush();
     await uploads;
 
-    return finish(products, urls, failures, stats, cache, settlers);
+    return finish(products, urls, failures, stats, cache, settlers, false);
   } catch (error) {
     /*
      * Something outside the per-image paths threw. Release every promise still
@@ -382,6 +427,7 @@ async function stageToS3(
   products: Product[],
   credentials: S3Credentials | null,
   cache: ImageCache,
+  deps: S3StageDeps,
 ): Promise<ImageStageResult> {
   if (credentials === null) {
     throw new S3ConfigError(
@@ -393,13 +439,14 @@ async function stageToS3(
   const stats = emptyStats(urls.length);
 
   if (urls.length === 0) {
-    return { products, failures: [], stats };
+    return { products, failures: [], stats, held: [] };
   }
 
   const fresh = urls.filter((url) => !cache.has(url));
   stats.fromCache = urls.length - fresh.length;
 
-  const uploader = new S3Uploader(credentials);
+  const uploader = deps.uploader?.(credentials) ?? new S3Uploader(credentials);
+  const delays = deps.retryDelaysMs ?? S3_RETRY_DELAYS_MS;
   const settlers = new Map<string, (image: StagedImage) => void>();
 
   for (const url of fresh) {
@@ -417,7 +464,7 @@ async function stageToS3(
 
     await inLanes(fresh, downloadLanes(), async (url) => {
       try {
-        settle(settlers, url, { url: await uploader.upload(url) });
+        settle(settlers, url, { url: await uploadWithRetry(uploader, url, delays) });
         stats.uploaded++;
       } catch (error) {
         // The whole hop is this process's own work — fetch then put — so the split
@@ -432,13 +479,36 @@ async function stageToS3(
 
     stats.downloadMs = Date.now() - startedAt;
 
-    return await finish(products, urls, failures, stats, cache, settlers);
+    return await finish(products, urls, failures, stats, cache, settlers, true);
   } catch (error) {
     releaseAll(settlers, cache, messageOf(error), "download");
     throw error;
   } finally {
     uploader.destroy();
   }
+}
+
+/** One image to the bucket, with the pauses in `delays` between attempts. */
+async function uploadWithRetry(
+  uploader: Pick<S3Uploader, "upload">,
+  url: string,
+  delays: number[],
+): Promise<string> {
+  let last: unknown;
+
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return await uploader.upload(url);
+    } catch (error) {
+      last = error;
+
+      if (attempt < delays.length) {
+        await new Promise((resolve) => setTimeout(resolve, delays[attempt]));
+      }
+    }
+  }
+
+  throw last;
 }
 
 /**
@@ -457,12 +527,18 @@ async function finish(
   stats: ImageStageStats,
   cache: ImageCache,
   settlers: Map<string, (image: StagedImage) => void>,
+  /**
+   * `s3`: a product with an image that did not stage is HELD, not sent with the
+   * supplier's link in its place. Every other mode keeps the original URL.
+   */
+  strict: boolean,
 ): Promise<ImageStageResult> {
   // Anything left unsettled would deadlock a later batch. Nothing should reach here,
   // so this is a backstop rather than a path.
   releaseAll(settlers, cache, "The image was never resolved", "upload");
 
   const mapping = new Map<string, string>();
+  const errors = new Map<string, string>();
 
   await Promise.all(
     urls.map(async (url) => {
@@ -470,6 +546,8 @@ async function finish(
 
       if (staged?.url != null) {
         mapping.set(url, staged.url);
+      } else {
+        errors.set(url, staged?.error ?? "The image could not be staged");
       }
     }),
   );
@@ -488,7 +566,23 @@ async function finish(
     }
   }
 
-  return { products: products.map((product) => rewrite(product, mapping)), failures, stats };
+  const held: HeldProduct[] = [];
+
+  if (strict) {
+    products.forEach((product, index) => {
+      const unresolved = imageUrlsOf(product).filter((url) => !mapping.has(url));
+
+      if (unresolved.length > 0) {
+        held.push({
+          index,
+          urls: unresolved,
+          error: errors.get(unresolved[0]) ?? "The image could not be staged",
+        });
+      }
+    });
+  }
+
+  return { products: products.map((product) => rewrite(product, mapping)), failures, stats, held };
 }
 
 function settle(
@@ -546,19 +640,22 @@ function messageOf(error: unknown): string {
 }
 
 function collectUrls(products: Product[]): string[] {
+  return [...new Set(products.flatMap(imageUrlsOf))];
+}
+
+/** Every image URL one product references, product-level and per variation. */
+function imageUrlsOf(product: Product): string[] {
   const urls = new Set<string>();
 
-  for (const product of products) {
-    for (const url of product.images ?? []) {
-      urls.add(url);
+  for (const url of product.images ?? []) {
+    urls.add(url);
+  }
+  for (const variation of product.variations ?? []) {
+    if (variation.image) {
+      urls.add(variation.image);
     }
-    for (const variation of product.variations ?? []) {
-      if (variation.image) {
-        urls.add(variation.image);
-      }
-      for (const url of variation.images ?? []) {
-        urls.add(url);
-      }
+    for (const url of variation.images ?? []) {
+      urls.add(url);
     }
   }
 
