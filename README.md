@@ -11,6 +11,8 @@ A web interface for publishing products to WooCommerce in bulk, through the
 | `/remove` | Removing products: select by run, SKU, category or everything, preview, then delete |
 | `/process` | Activity: running, queued, history, bulk cancel, repeating runs |
 | `/process/[id]` | One run in detail: per-row results, per-batch speed, resend failures, export CSV |
+
+**Resending is one run, not a family of them.** *Resend failed rows* starts a short run of just those rows; when it finishes, its results are written back into the run it came from (rows overwritten, counters moved, its log kept inside as `[resend] …`) and the short run disappears. So there is one run per original, *Resend* afterwards offers only what is still failing, it is refused while a resend is going, and a run cannot be resent twice from stale failures. Resends made before this change stay as runs of their own, are shown under the run they came from, and make that run say *Already resent*. History is a list rather than a table so a long title wraps instead of widening the page, and it sorts by date (newest or oldest first), failures, or name.
 | `/stores` | Sites and their plugin health |
 | `/stores/[id]` | One site: `/health` data, maintenance, taxonomy, both histories |
 | `/settings` | Theme, import defaults, Amazon S3, run notifications by webhook and Telegram, Redis check, server environment |

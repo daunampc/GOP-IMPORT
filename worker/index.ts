@@ -26,6 +26,7 @@ import {
   getJobState,
   isTerminal,
   markRunning,
+  mergeRetryIntoParent,
   type CancelMode,
   type JobState,
   type RunResult,
@@ -2124,7 +2125,37 @@ void stopConnection.subscribe(STOP_CHANNEL).catch((error: unknown) => {
   );
 });
 
-const worker = new Worker<{ jobId: string }>(QUEUE_NAME, runJob, {
+/**
+ * Run one job, then — if it was a resend — fold it back into the run it came from.
+ *
+ * Here, around the whole run, rather than inside each kind of run: an import, a bulk
+ * edit and a removal all end in the same place, and every early return in them (a
+ * refused permission, a removed site) is a resend that also has to be accounted for.
+ * A merge that fails is logged and leaves the resend visible; it never fails the run.
+ */
+async function runAndMerge(job: Job<{ jobId: string }>): Promise<void> {
+  try {
+    await runJob(job);
+  } finally {
+    try {
+      const merged = await mergeRetryIntoParent(job.data.jobId);
+
+      if (merged.merged) {
+        console.log(
+          `[worker] ${job.data.jobId}: merged into ${merged.parentId} — ` +
+            `${merged.recovered} of ${merged.tried} row(s) fixed.`,
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[worker] ${job.data.jobId}: could not merge this resend into its original run:`,
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+}
+
+const worker = new Worker<{ jobId: string }>(QUEUE_NAME, runAndMerge, {
   connection: workerConnection,
   concurrency: CONCURRENCY,
 });

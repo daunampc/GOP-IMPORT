@@ -6,6 +6,8 @@ import {
   getJobProducts,
   getJobState,
   getResults,
+  listJobsRetryingFrom,
+  withRetryIndexes,
   type JobState,
 } from "@/lib/jobs";
 import { getPurgeItems } from "@/lib/purge";
@@ -58,6 +60,41 @@ export async function POST(
     );
   }
 
+  /*
+   * ONE resend at a time, and never one from a run that has already been resent.
+   *
+   * A resend that is still going has not yet said which of these rows it fixed, so a
+   * second one would send the same rows again alongside it. And an older resend that
+   * was never folded back (from before resends were merged into their original) means
+   * these failures were ALREADY resent — in that run, which is where to look.
+   */
+  const resends = await listJobsRetryingFrom(id);
+  const going = resends.find((resend) => resend.status === "queued" || resend.status === "running");
+
+  if (going !== undefined) {
+    return Response.json(
+      {
+        error:
+          "A resend of this run is already in progress. Wait for it to finish — its results are " +
+          "folded back into this run, and only what is still failing can be resent after that.",
+        resendId: going.id,
+      },
+      { status: 409 },
+    );
+  }
+
+  if (resends.length > 0) {
+    return Response.json(
+      {
+        error:
+          "These failures were already resent, in another run. Open that run to resend what is " +
+          "still failing there.",
+        resendId: resends[0].id,
+      },
+      { status: 409 },
+    );
+  }
+
   const results = await getResults(id, 0, 100_000);
   const failedIndexes = results.filter((result) => !result.ok).map((result) => result.index);
 
@@ -100,7 +137,8 @@ async function retryEdit(
   store: Store,
 ): Promise<Outcome> {
   const items = await getEditItems(job.id);
-  const wanted = items.filter((_item, index) => failedIndexes.includes(index));
+  const keep = failedIndexes.filter((index) => index >= 0 && index < items.length).sort((a, b) => a - b);
+  const wanted = keep.map((index) => items[index]);
 
   if (wanted.length === 0) {
     return { error: "The staged list of changes for this run is no longer available." };
@@ -113,7 +151,7 @@ async function retryEdit(
     sourceLabel: `Resent — ${job.sourceLabel}`,
     createdBy: job.createdBy,
     retryOf: job.id,
-    options: job.options as EditOptions,
+    options: withRetryIndexes(job.options as EditOptions, keep),
     products: wanted,
   });
 
@@ -131,9 +169,8 @@ async function retryImport(
     return { error: "This run's staged products are gone. Start again from the source file." };
   }
 
-  const failed = failedIndexes
-    .map((index) => products[index])
-    .filter((product): product is NonNullable<typeof product> => product !== undefined);
+  const keep = failedIndexes.filter((index) => products[index] !== undefined);
+  const failed = keep.map((index) => products[index]);
 
   if (failed.length === 0) {
     return { error: "The failed rows could not be matched to the staged payload." };
@@ -145,7 +182,7 @@ async function retryImport(
       storeUrl: store.url,
       storeLabel: storeLabel(store),
       sourceLabel: `Resend ${failed.length} failed row(s) — ${job.sourceLabel}`,
-      options: job.options as ImportOptions,
+      options: withRetryIndexes(job.options as ImportOptions, keep),
       products: failed,
       // The retry belongs to the account that owns the ORIGINAL run, not to
       // whoever pressed the button: an administrator resending a member's
@@ -168,9 +205,8 @@ async function retryPurge(job: JobState, failedIndexes: number[], store: Store):
     return { error: "This run's staged list of products is gone." };
   }
 
-  const failed = failedIndexes
-    .map((index) => items[index])
-    .filter((item): item is NonNullable<typeof item> => item !== undefined);
+  const keep = failedIndexes.filter((index) => items[index] !== undefined);
+  const failed = keep.map((index) => items[index]);
 
   if (failed.length === 0) {
     return { error: "The failed rows could not be matched to the staged list." };
@@ -182,7 +218,7 @@ async function retryPurge(job: JobState, failedIndexes: number[], store: Store):
       storeUrl: store.url,
       storeLabel: storeLabel(store),
       sourceLabel: `Retry ${failed.length} failed removal(s) — ${job.sourceLabel}`,
-      options: job.options as PurgeOptions,
+      options: withRetryIndexes(job.options as PurgeOptions, keep),
       products: failed,
       createdBy: job.createdBy,
       retryOf: job.id,

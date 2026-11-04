@@ -1273,3 +1273,184 @@ async function forgetWhere(
 }
 
 export { and, eq, inArray };
+
+/* ------------------------------------------------------------------ resends */
+
+/**
+ * The rows of the ORIGINAL run that a resend carries, in the order the resend sends
+ * them. Position `i` of the resend is row `retryIndexes(options)[i]` of the original.
+ *
+ * Stored on the resend's own options when it is created, rather than recomputed from
+ * the original's failures afterwards: that answer can move, and a mapping that is
+ * wrong by one row writes a product's result onto a different product.
+ *
+ * `null` for a run that is not a resend, and for resends made before this existed —
+ * those are never merged, because there is nothing to say which row is which.
+ */
+export function retryIndexesOf(options: Record<string, unknown>): number[] | null {
+  const value = options.retryIndexes;
+
+  return Array.isArray(value) && value.every((entry) => Number.isInteger(entry))
+    ? (value as number[])
+    : null;
+}
+
+/** A resend's options: the original's, plus which of its rows this run carries. */
+export function withRetryIndexes<T extends object>(options: T, indexes: number[]): T {
+  return { ...options, retryIndexes: indexes };
+}
+
+export interface MergeOutcome {
+  merged: boolean;
+  /** Why not, when it did not. */
+  reason?: string;
+  parentId?: string;
+  tried?: number;
+  recovered?: number;
+  stillFailed?: number;
+}
+
+/**
+ * Fold a finished resend back into the run it came from, and remove the resend.
+ *
+ * WHY THIS EXISTS. A resend used to be a run of its own. Resend its failures and there
+ * was a grandchild; the original still offered Resend, so pressing it again re-sent rows
+ * that were already fixed; and nothing on a list said which run was a resend of which.
+ * Now there is exactly one run per original: its rows are overwritten with what the
+ * resend found, its counters follow, the resend's log is kept inside it, and the resend
+ * itself disappears. "Resend failed rows" afterwards offers only what is STILL failing.
+ *
+ * Only what the resend actually reached is written. A resend that was cancelled halfway
+ * leaves the rest failing in the original, where Resend can pick them up again.
+ *
+ * Does nothing — and leaves the resend visible — when it cannot tell which row is which
+ * (a resend from before the mapping was stored), or when it is still going.
+ */
+export async function mergeRetryIntoParent(childId: string): Promise<MergeOutcome> {
+  const child = await getJobState(childId);
+
+  if (child === null || child.retryOf === null) {
+    return { merged: false, reason: "not a resend" };
+  }
+
+  if (child.status !== "completed" && child.status !== "failed" && child.status !== "cancelled") {
+    return { merged: false, reason: "still going" };
+  }
+
+  const parentId = child.retryOf;
+  const parent = await getJobState(parentId);
+
+  if (parent === null) {
+    return { merged: false, reason: "the original run is gone" };
+  }
+
+  const indexes = retryIndexesOf(child.options);
+
+  if (indexes === null) {
+    return { merged: false, reason: "this resend predates row mapping" };
+  }
+
+  return db.transaction(async (tx) => {
+    const childRows = await tx.select().from(jobResults).where(eq(jobResults.jobId, childId));
+
+    let recovered = 0;
+    let deduplicated = 0;
+
+    for (const row of childRows) {
+      const target = indexes[row.index];
+
+      if (target === undefined) {
+        continue;
+      }
+
+      const [previous] = await tx
+        .select({ ok: jobResults.ok })
+        .from(jobResults)
+        .where(and(eq(jobResults.jobId, parentId), eq(jobResults.index, target)))
+        .limit(1);
+
+      // Only a row that was FAILING can change the counters; one that somehow was not
+      // is overwritten but not counted twice.
+      const wasFailing = previous !== undefined && !previous.ok;
+
+      if (previous === undefined) {
+        await tx.insert(jobResults).values({ ...row, jobId: parentId, index: target });
+      } else {
+        await tx
+          .update(jobResults)
+          .set({
+            ok: row.ok,
+            productId: row.productId,
+            sku: row.sku,
+            name: row.name,
+            variationIds: row.variationIds,
+            deduplicated: row.deduplicated,
+            removed: row.removed,
+            changed: row.changed,
+            action: row.action,
+            errorCode: row.errorCode,
+            errorMessage: row.errorMessage,
+          })
+          .where(and(eq(jobResults.jobId, parentId), eq(jobResults.index, target)));
+      }
+
+      if (row.ok && wasFailing) {
+        recovered++;
+        if (row.deduplicated) {
+          deduplicated++;
+        }
+      }
+    }
+
+    if (recovered > 0) {
+      await tx
+        .update(jobsTable)
+        .set({
+          succeeded: sql`${jobsTable.succeeded} + ${recovered}`,
+          failed: sql`GREATEST(0, ${jobsTable.failed} - ${recovered})`,
+          deduplicated: sql`${jobsTable.deduplicated} + ${deduplicated}`,
+        })
+        .where(eq(jobsTable.id, parentId));
+    }
+
+    // The resend's log, kept: inside the original run, marked as a resend, in order.
+    await tx.execute(sql`
+      INSERT INTO job_log (job_id, at, level, stage, batch_index, message, detail)
+      SELECT ${parentId}, at, level, stage, batch_index, '[resend] ' || message, detail
+      FROM job_log WHERE job_id = ${childId} ORDER BY id
+    `);
+
+    await tx.insert(jobLogs).values({
+      jobId: parentId,
+      level: recovered === indexes.length ? "info" : "warn",
+      stage: "finish",
+      message:
+        `Resend of ${indexes.length} failed row(s) finished (${child.status}): ${recovered} fixed, ` +
+        `${indexes.length - recovered} still failing` +
+        (child.error ? ` — ${child.error}` : "."),
+      detail: { resend: childId, tried: indexes.length, recovered, status: child.status },
+    });
+
+    // Gone, and its payload, results, batches and log lines with it by cascade.
+    await tx.delete(jobsTable).where(eq(jobsTable.id, childId));
+
+    return {
+      merged: true,
+      parentId,
+      tried: indexes.length,
+      recovered,
+      stillFailed: indexes.length - recovered,
+    };
+  });
+}
+
+/** The runs created from this run's failed rows, newest first. Merged ones no longer exist. */
+export async function listJobsRetryingFrom(id: string): Promise<JobState[]> {
+  const rows = await db
+    .select()
+    .from(jobsTable)
+    .where(eq(jobsTable.retryOf, id))
+    .orderBy(desc(jobsTable.createdAt));
+
+  return rows.map(toState);
+}

@@ -46,6 +46,8 @@ import { isDeletable, isStoppable } from "@/lib/job-display";
 import type { JobState } from "@/lib/jobs";
 import { Input } from "@/components/ui";
 
+import { HistoryList } from "./history-list";
+
 /**
  * The activity list.
  *
@@ -154,6 +156,17 @@ export function ProcessListView() {
     const all = [...snapshot.running, ...snapshot.queued, ...snapshot.scheduled, ...snapshot.history];
     return all.filter((job) => selected.has(job.id));
   }, [snapshot, selected]);
+
+  /** Every run there is, by id — so a resend can say WHICH run it is a resend of. */
+  const byId = useMemo(
+    () =>
+      new Map(
+        [...snapshot.running, ...snapshot.queued, ...snapshot.scheduled, ...snapshot.history].map(
+          (job) => [job.id, job] as const,
+        ),
+      ),
+    [snapshot],
+  );
 
   const selectedStoppable = selectedJobs.filter(isStoppable).length;
   const selectedDeletable = selectedJobs.filter(isDeletable).length;
@@ -316,16 +329,26 @@ export function ProcessListView() {
         header: "Source",
         sortable: true,
         sortValue: (job) => job.sourceLabel,
-        cell: (job) => (
-          <div className="min-w-0">
-            <span className="block truncate text-sm text-ink">{job.sourceLabel}</span>
-            <span className="block truncate text-2xs text-ink-subtle">
-              <DateTime iso={job.createdAt} />
-              {job.retryOf ? " · resent failures" : ""}
-              {job.groupId ? " · multi-site batch" : ""}
-            </span>
-          </div>
-        ),
+        cell: (job) => {
+          const parent = job.retryOf === null ? undefined : byId.get(job.retryOf);
+
+          return (
+            // A width of its own: a table cell otherwise grows to its longest title, and
+            // the panel scrolls sideways.
+            <div className="min-w-0 max-w-[min(32rem,45vw)]">
+              <span className="block truncate text-sm text-ink" title={job.sourceLabel}>
+                {job.sourceLabel}
+              </span>
+              <span className="block truncate text-2xs text-ink-subtle">
+                <DateTime iso={job.createdAt} />
+                {job.retryOf
+                  ? ` · resending failed rows of “${parent?.sourceLabel ?? "an earlier run"}”`
+                  : ""}
+                {job.groupId ? " · multi-site batch" : ""}
+              </span>
+            </div>
+          );
+        },
       },
       {
         key: "store",
@@ -411,7 +434,20 @@ export function ProcessListView() {
           ),
       },
     ],
-    [scope],
+    [scope, byId],
+  );
+
+  const historyEmpty = (
+    <EmptyState
+      icon="history"
+      title="No finished runs yet"
+      description="History is kept for 7 days. After the first run, every row\u2019s result is searchable here."
+      action={
+        <ButtonLink href="/import" variant="primary" icon="upload">
+          Start an import
+        </ButtonLink>
+      }
+    />
   );
 
   return (
@@ -612,64 +648,66 @@ export function ProcessListView() {
           </div>
         ) : null}
 
-        <DataTable
-          caption={
-            scope === "active"
-              ? "Runs that are running or queued"
-              : scope === "scheduled"
-                ? "Runs waiting for their time"
-                : "Run history"
-          }
-          rows={rows}
-          columns={columns}
-          rowKey={(job) => job.id}
-          // Selectable on every tab now: history is where deleting happens, and
-          // it used to be the one tab with no way to select anything.
-          selectable
-          selected={selected}
-          onSelectedChange={setSelected}
-          onRowClick={(job) => router.push(`/process/${job.id}`)}
-          rowTone={(job) =>
-            job.status === "failed" ? "bad" : job.status === "cancelled" ? "warn" : "none"
-          }
-          defaultSort={{ key: "source", direction: "desc" }}
-          empty={
-            scope === "active" ? (
-              <EmptyState
-                icon="activity"
-                title="Nothing running"
-                description="The queue is empty and the worker is idle. Start a run to watch its progress here and on the status bar."
-                action={
-                  <ButtonLink href="/import" variant="primary" icon="upload">
-                    Start an import
-                  </ButtonLink>
-                }
-              />
-            ) : scope === "scheduled" ? (
-              <EmptyState
-                icon="clock"
-                title="Nothing scheduled"
-                description="A run can be set to start later from the last step of the import wizard. Its products are staged when you schedule it, so it does not depend on the preview staying alive."
-                action={
-                  <ButtonLink href="/import" variant="primary" icon="upload">
-                    Start an import
-                  </ButtonLink>
-                }
-              />
-            ) : (
-              <EmptyState
-                icon="history"
-                title="No finished runs yet"
-                description="History is kept for 7 days. After the first run, every row\u2019s result is searchable here."
-                action={
-                  <ButtonLink href="/import" variant="primary" icon="upload">
-                    Start an import
-                  </ButtonLink>
-                }
-              />
-            )
-          }
-        />
+        {scope === "history" ? (
+          <HistoryList
+            jobs={snapshot.history}
+            everything={[...byId.values()]}
+            query={query}
+            selected={selected}
+            onSelectedChange={setSelected}
+            empty={historyEmpty}
+          />
+        ) : (
+          <DataTable
+            caption={
+              scope === "active"
+                ? "Runs that are running or queued"
+                : scope === "scheduled"
+                  ? "Runs waiting for their time"
+                  : "Run history"
+            }
+            rows={rows}
+            columns={columns}
+            rowKey={(job) => job.id}
+            // Selectable on every tab now: history is where deleting happens, and
+            // it used to be the one tab with no way to select anything.
+            selectable
+            selected={selected}
+            onSelectedChange={setSelected}
+            onRowClick={(job) => router.push(`/process/${job.id}`)}
+            rowTone={(job) =>
+              job.status === "failed" ? "bad" : job.status === "cancelled" ? "warn" : "none"
+            }
+            defaultSort={{ key: "source", direction: "desc" }}
+            empty={
+              scope === "active" ? (
+                <EmptyState
+                  icon="activity"
+                  title="Nothing running"
+                  description="The queue is empty and the worker is idle. Start a run to watch its progress here and on the status bar."
+                  action={
+                    <ButtonLink href="/import" variant="primary" icon="upload">
+                      Start an import
+                    </ButtonLink>
+                  }
+                />
+              ) : scope === "scheduled" ? (
+                <EmptyState
+                  icon="clock"
+                  title="Nothing scheduled"
+                  description="A run can be set to start later from the last step of the import wizard. Its products are staged when you schedule it, so it does not depend on the preview staying alive."
+                  action={
+                    <ButtonLink href="/import" variant="primary" icon="upload">
+                      Start an import
+                    </ButtonLink>
+                  }
+                />
+              ) : (
+                historyEmpty
+              )
+            }
+          />
+        )}
       </Panel>
 
       <ConfirmDialog

@@ -415,6 +415,25 @@ export function JobDetailView({
     }
   }
 
+  /*
+   * The resends made from THIS run that still exist as runs of their own.
+   *
+   * A resend is folded back into its original when it finishes, so normally there is at
+   * most one and it is running. A finished one is from before resends were merged — and
+   * either way the failures on screen have already been resent, which is why the Resend
+   * button below gives way to a link to it instead of offering to do it all again.
+   */
+  const resends = useMemo(
+    () =>
+      [...snapshot.running, ...snapshot.queued, ...snapshot.scheduled, ...snapshot.history].filter(
+        (other) => other.retryOf === job.id,
+      ),
+    [snapshot, job.id],
+  );
+
+  const resending = resends.find((other) => other.status === "queued" || other.status === "running");
+  const alreadyResent = resends.find((other) => other.id !== resending?.id);
+
   async function retryFailed() {
     setBusy("retry");
     try {
@@ -427,11 +446,12 @@ export function JobDetailView({
       }
 
       toast.success(
-        `Created a new run with ${payload.job.total} failed row(s)`,
-        "The idempotency keys are unchanged, so a row that did reach the site comes back as already present rather than becoming a second product.",
+        `Resending ${payload.job.total} failed row(s)`,
+        "When it finishes, its results are folded into THIS run — this stays the one run, " +
+          "and only what is still failing can be resent afterwards. A row that did reach the " +
+          "site comes back as already present rather than becoming a second product.",
       );
       await refresh();
-      router.push(`/process/${payload.job.id}`);
     } finally {
       setBusy(null);
     }
@@ -696,7 +716,7 @@ export function JobDetailView({
                 variant="ghost"
                 icon="history"
               >
-                Resent from an earlier run
+                Resending rows of an earlier run
               </ButtonLink>
             ) : null}
           </div>
@@ -752,7 +772,21 @@ export function JobDetailView({
             </Tooltip>
           ) : null}
 
-          {!active && job.failed > 0 ? (
+          {!active && job.failed > 0 && resending !== undefined ? (
+            <ButtonLink href={`/process/${resending.id}`} variant="secondary" icon="refresh">
+              Resending {formatNumber(resending.total)} row(s) — watch it
+            </ButtonLink>
+          ) : null}
+
+          {!active && job.failed > 0 && resending === undefined && alreadyResent !== undefined ? (
+            <Tooltip content="These failures were already resent. Open that run to resend what is still failing there.">
+              <ButtonLink href={`/process/${alreadyResent.id}`} variant="secondary" icon="history">
+                Already resent — open that run
+              </ButtonLink>
+            </Tooltip>
+          ) : null}
+
+          {!active && job.failed > 0 && resends.length === 0 ? (
             <Button
               variant="primary"
               icon="refresh"
@@ -1126,17 +1160,29 @@ export function JobDetailView({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              <Tooltip content="Creates a new run with exactly these rows. The idempotency keys are unchanged, so a row that did reach the site comes back as already present rather than becoming a second product.">
-                <Button
-                  variant="primary"
-                  icon="refresh"
-                  loading={busy === "retry"}
-                  disabled={store === null}
-                  onClick={() => void retryFailed()}
-                >
-                  Resend these {formatNumber(counts.failed)} product(s)
-                </Button>
-              </Tooltip>
+              {resending !== undefined ? (
+                <ButtonLink href={`/process/${resending.id}`} variant="primary" icon="refresh">
+                  Resending {formatNumber(resending.total)} row(s) — watch it
+                </ButtonLink>
+              ) : alreadyResent !== undefined ? (
+                <Tooltip content="These failures were already resent, in another run. Open it to resend what is still failing there.">
+                  <ButtonLink href={`/process/${alreadyResent.id}`} variant="primary" icon="history">
+                    Already resent — open that run
+                  </ButtonLink>
+                </Tooltip>
+              ) : (
+                <Tooltip content="Sends exactly these rows again. When it finishes, the results are folded into THIS run, so it stays the one run. The idempotency keys are unchanged, so a row that did reach the site comes back as already present rather than becoming a second product.">
+                  <Button
+                    variant="primary"
+                    icon="refresh"
+                    loading={busy === "retry"}
+                    disabled={store === null}
+                    onClick={() => void retryFailed()}
+                  >
+                    Resend these {formatNumber(counts.failed)} product(s)
+                  </Button>
+                </Tooltip>
+              )}
 
               {/* A real link rather than a scripted download: a plain GET the server
                   already serves, and script-driven saves can be blocked. */}
